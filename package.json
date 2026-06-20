@@ -1,6 +1,6 @@
 {
   "name": "@arcisprotocol/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Arcis Protocol MCP Server — connect any AI agent to DeFi vaults in one tool call",
   "type": "module",
   "main": "dist/index.js",

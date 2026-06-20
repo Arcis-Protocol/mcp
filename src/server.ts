@@ -60,6 +60,17 @@ const client = createPublicClient({ chain: baseSepolia, transport: http() });
 const fmtUSDC = (raw: bigint) => formatUnits(raw, 6);
 const fmtRate = (raw: bigint) => { const n = Number(raw) / 1e18; return n > 1000 || n < 0.0001 ? "1.000000" : n.toFixed(6); };
 
+// Rate limiting for write tools
+const writeRateLimit = new Map<string, number>();
+const WRITE_COOLDOWN_MS = 60_000;
+function checkRateLimit(key: string): string | null {
+  const last = writeRateLimit.get(key) || 0;
+  const remaining = WRITE_COOLDOWN_MS - (Date.now() - last);
+  if (remaining > 0) return `Rate limited. Try again in ${Math.ceil(remaining / 1000)}s.`;
+  writeRateLimit.set(key, Date.now());
+  return null;
+}
+
 // ═══════════════════════════════════════════════════
 //  SERVER
 // ═══════════════════════════════════════════════════
@@ -297,6 +308,8 @@ server.tool(
   },
   async ({ amount, private_key }) => {
     try {
+      const rateErr = checkRateLimit(private_key.slice(0, 10));
+      if (rateErr) return error(rateErr);
       const amountRaw = BigInt(Math.floor(amount * 1e6));
       const account = privateKeyToAccount(private_key as `0x${string}`);
       const wallet = createWalletClient({ chain: baseSepolia, transport: http(), account });
@@ -354,6 +367,8 @@ server.tool(
   },
   async ({ shares, private_key, withdraw_all }) => {
     try {
+      const rateErr = checkRateLimit(private_key.slice(0, 10));
+      if (rateErr) return error(rateErr);
       const account = privateKeyToAccount(private_key as `0x${string}`);
       const wallet = createWalletClient({ chain: baseSepolia, transport: http(), account });
 
@@ -436,4 +451,3 @@ Three functions. Any agent framework.
 //  START
 // ═══════════════════════════════════════════════════
 
-export { server };
