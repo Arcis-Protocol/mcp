@@ -1,7 +1,7 @@
 {
   "name": "@arcisprotocol/mcp",
-  "version": "0.1.3",
-  "description": "Arcis Protocol MCP Server — connect any AI agent to DeFi vaults in one tool call",
+  "version": "0.2.0",
+  "description": "Arcis Protocol MCP Server \u2014 connect any AI agent to DeFi vaults in one tool call",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -17,9 +17,19 @@
     "dev:remote": "tsx src/remote.ts",
     "start": "node dist/index.js",
     "start:remote": "node dist/remote.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "dev:vercel": "next dev",
+    "build:vercel": "next build"
   },
-  "keywords": ["arcis", "mcp", "model-context-protocol", "defi", "ai-agents", "vault", "base"],
+  "keywords": [
+    "arcis",
+    "mcp",
+    "model-context-protocol",
+    "defi",
+    "ai-agents",
+    "vault",
+    "base"
+  ],
   "author": "Arcis Protocol <dev@arcis.money>",
   "license": "MIT",
   "repository": {
@@ -33,12 +43,18 @@
   "dependencies": {
     "mcp-use": "^0.14.0",
     "viem": "^2.21.0",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "mcp-handler": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
     "tsup": "^8.3.0",
     "tsx": "^4.19.0",
     "@types/node": "^22.0.0"
+  },
+  "optionalDependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }
