@@ -1,6 +1,6 @@
 {
   "name": "@arcisprotocol/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Arcis Protocol MCP Server — connect any AI agent to DeFi vaults in one tool call",
   "type": "module",
   "main": "dist/index.js",
@@ -12,9 +12,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --clean",
+    "build": "tsup src/index.ts src/remote.ts src/server.ts --format esm --clean",
     "dev": "tsx src/index.ts",
+    "dev:remote": "tsx src/remote.ts",
     "start": "node dist/index.js",
+    "start:remote": "node dist/remote.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": ["arcis", "mcp", "model-context-protocol", "defi", "ai-agents", "vault", "base"],
