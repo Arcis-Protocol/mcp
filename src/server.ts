@@ -34,6 +34,8 @@ const VAULT_ABI = [
   { name: "exchangeRate", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
   { name: "depositCap", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
   { name: "remainingCapacity", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
+  { name: "asset", type: "function", inputs: [], outputs: [{ name: "", type: "address" }], stateMutability: "view" },
+  { name: "maxDeposit", type: "function", inputs: [{ name: "agent", type: "address" }], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
   { name: "reserveBalance", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
   { name: "deployedBalance", type: "function", inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" },
   { name: "paused", type: "function", inputs: [], outputs: [{ name: "", type: "bool" }], stateMutability: "view" },
