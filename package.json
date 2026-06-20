@@ -1,31 +1,42 @@
 {
-  "name": "@arcis/mcp",
+  "name": "@arcisprotocol/mcp",
   "version": "0.1.0",
-  "description": "Arcis Protocol MCP Server — agent vault operations for any LLM",
+  "description": "Arcis Protocol MCP Server — connect any AI agent to DeFi vaults in one tool call",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "arcis-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --clean",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [
-    "arcis",
-    "mcp",
-    "defi",
-    "ai-agents",
-    "vault"
-  ],
+  "keywords": ["arcis", "mcp", "model-context-protocol", "defi", "ai-agents", "vault", "base"],
+  "author": "Arcis Protocol <dev@arcis.money>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Arcis-Protocol/mcp.git"
+  },
+  "homepage": "https://arcis.money",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "mcp-use": "^1.32.1",
-    "viem": "^2.52.2",
-    "zod": "^4.4.3"
+    "mcp-use": "^0.14.0",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
-    "tsup": "^8.5.1",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^5.6.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0"
   }
 }

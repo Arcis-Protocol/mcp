@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { MCPServer, text, object, error, markdown } from "mcp-use/server";
 import { z } from "zod";
 import { createPublicClient, createWalletClient, http, defineChain, formatUnits, type Address } from "viem";
