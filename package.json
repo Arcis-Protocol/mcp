@@ -1,0 +1,31 @@
+{
+  "name": "@arcis/mcp",
+  "version": "0.1.0",
+  "description": "Arcis Protocol MCP Server — agent vault operations for any LLM",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "arcis",
+    "mcp",
+    "defi",
+    "ai-agents",
+    "vault"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "mcp-use": "^1.32.1",
+    "viem": "^2.52.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
