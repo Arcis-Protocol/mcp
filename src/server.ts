@@ -5,21 +5,21 @@ import { privateKeyToAccount } from "viem/accounts";
 
 // ── Chain ──
 const baseSepolia = defineChain({
-  id: 84532,
-  name: "Base Sepolia",
+  id: 8453,
+  name: "Base",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: ["https://sepolia.base.org"] } },
+  rpcUrls: { default: { http: ["https://mainnet.base.org"] } },
   blockExplorers: { default: { name: "Blockscout", url: "https://base-sepolia.blockscout.com" } },
 });
 
 // ── Addresses ──
 const ADDR = {
-  vault: "0xa8eF658E125C7f6D7aFa9B6b8035b66b32CBE98d" as Address,
+  vault: "0x00325d9da832b38179ed2f0dabd4062d93e325a7" as Address,
   credit: "0x019540E33a0292a9DDE36bD9Ef11774d5A1Ce6FC" as Address,
-  router: "0x0281e7D37683c585325004F84e0b94170c78d5B4" as Address,
-  usdc: "0x29440A12f15fe6bDf5F624f4eeEB298CCb782f05" as Address,
-  allocator: "0x9f101e1159AA530dC5Cb104decB32aBA1eAF2617" as Address,
-  strategy: "0x9d6FB397224141FD323096e95667d3Ae5D9FF9cC" as Address,
+  router: "0xeC3b7Daa942C03651D55A4A01797498fA6dB728F" as Address,
+  usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address,
+  allocator: "0x7Fd5d7b49694858FCf143E0039e83cDB0196DD7A" as Address,
+  strategy: "0x43626D6162Ccb12328B989BB228DaD2941F2F12a" as Address,
   identity: "0x79E79629DB86CFb8feF9594621882b065EBC80A7" as Address,
 };
 
@@ -111,7 +111,7 @@ server.tool(
       const resPct = totalAssets > 0n ? (Number(reserve * 10000n / totalAssets) / 100).toFixed(1) : "0";
 
       return object({
-        network: "Base Sepolia (84532)",
+        network: "Base (8453)",
         contract: ADDR.vault,
         status: paused ? "PAUSED" : "ACTIVE",
         tvl_usdc: fmtUSDC(totalAssets),
@@ -270,12 +270,12 @@ server.tool(
 server.tool(
   {
     name: "arcis_contracts",
-    description: "List all deployed Arcis Protocol contract addresses on Base Sepolia with their roles.",
+    description: "List all deployed Arcis Protocol contract addresses on Base with their roles.",
     schema: z.object({}),
   },
   async () => {
     return object({
-      network: "Base Sepolia (84532)",
+      network: "Base (8453)",
       explorer: "https://base-sepolia.blockscout.com",
       contracts: {
         ArcisVault: { address: ADDR.vault, role: "ERC-4626 yield vault (raUSDC)" },

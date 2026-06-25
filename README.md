@@ -54,7 +54,7 @@ Then in Claude.ai: Settings → Connectors → Add → paste the URL.
 ## How It Connects
 
 ```
-AI Agent ←→ MCP Server ←→ Base Sepolia ←→ Arcis Contracts
+AI Agent ←→ MCP Server ←→ Base Mainnet ←→ Arcis Contracts
 ```
 
 CUSTOS (the Arcis keeper agent) uses the same contract interfaces. If CUSTOS can operate the protocol autonomously, any agent can.

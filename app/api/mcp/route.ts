@@ -5,23 +5,23 @@ import { privateKeyToAccount } from "viem/accounts";
 
 // ── Chain ──
 const baseSepolia = defineChain({
-  id: 84532,
-  name: "Base Sepolia",
+  id: 8453,
+  name: "Base",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: ["https://sepolia.base.org"] } },
-  blockExplorers: { default: { name: "Blockscout", url: "https://base-sepolia.blockscout.com" } },
+  rpcUrls: { default: { http: ["https://mainnet.base.org"] } },
+  blockExplorers: { default: { name: "Blockscout", url: "https://basescan.org" } },
 });
 
 const client = createPublicClient({ chain: baseSepolia, transport: http() });
 
 // ── Addresses ──
 const ADDR = {
-  vault: "0xa8eF658E125C7f6D7aFa9B6b8035b66b32CBE98d" as `0x${string}`,
+  vault: "0x00325d9da832b38179ed2f0dabd4062d93e325a7" as `0x${string}`,
   credit: "0x019540E33a0292a9DDE36bD9Ef11774d5A1Ce6FC" as `0x${string}`,
-  router: "0x0281e7D37683c585325004F84e0b94170c78d5B4" as `0x${string}`,
-  usdc: "0x29440A12f15fe6bDf5F624f4eeEB298CCb782f05" as `0x${string}`,
-  strategy: "0x9d6FB397224141FD323096e95667d3Ae5D9FF9cC" as `0x${string}`,
-  allocator: "0x9f101e1159AA530dC5Cb104decB32aBA1eAF2617" as `0x${string}`,
+  router: "0xeC3b7Daa942C03651D55A4A01797498fA6dB728F" as `0x${string}`,
+  usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as `0x${string}`,
+  strategy: "0x43626D6162Ccb12328B989BB228DaD2941F2F12a" as `0x${string}`,
+  allocator: "0x7Fd5d7b49694858FCf143E0039e83cDB0196DD7A" as `0x${string}`,
   registry: "0x79E79629DB86CFb8feF9594621882b065EBC80A7" as `0x${string}`,
 };
 
@@ -156,7 +156,7 @@ const handler = createMcpHandler(
     });
 
     server.tool("arcis_contracts", "Get all deployed contract addresses", {}, async () => {
-      return ok(`# Arcis Protocol Contracts (Base Sepolia)\n- ArcisVault (raUSDC): ${ADDR.vault}\n- AgentCredit: ${ADDR.credit}\n- ATIRouter: ${ADDR.router}\n- MockUSDC: ${ADDR.usdc}\n- MockStrategy: ${ADDR.strategy}\n- StrategyAllocator: ${ADDR.allocator}\n- MockIdentityRegistry: ${ADDR.registry}\n\nExplorer: https://base-sepolia.blockscout.com`);
+      return ok(`# Arcis Protocol Contracts (Base)\n- ArcisVault (raUSDC): ${ADDR.vault}\n- AgentCredit: ${ADDR.credit}\n- ATIRouter: ${ADDR.router}\n- MockUSDC: ${ADDR.usdc}\n- MockStrategy: ${ADDR.strategy}\n- StrategyAllocator: ${ADDR.allocator}\n- MockIdentityRegistry: ${ADDR.registry}\n\nExplorer: https://basescan.org`);
     });
 
     // ═══ WRITE TOOLS ═══
@@ -175,7 +175,7 @@ const handler = createMcpHandler(
         if (usdcBal < amountRaw) return error(`Insufficient USDC. Balance: $${fmtUSDC(usdcBal)}, needed: $${amount}`);
         await wallet.writeContract({ address: ADDR.usdc, abi: ERC20_ABI, functionName: "approve", args: [ADDR.vault, amountRaw], chain: baseSepolia });
         const hash = await wallet.writeContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "deposit", args: [amountRaw], chain: baseSepolia });
-        return ok(`Deposited $${amount} USDC into Arcis Vault.\nTx: https://base-sepolia.blockscout.com/tx/${hash}`);
+        return ok(`Deposited $${amount} USDC into Arcis Vault.\nTx: https://basescan.org/tx/${hash}`);
       } catch (e: any) { return error(e.message); }
     });
 
@@ -198,7 +198,7 @@ const handler = createMcpHandler(
           sharesToRedeem = BigInt(Math.floor(shares * 1e6));
         }
         const hash = await wallet.writeContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "withdraw", args: [sharesToRedeem], chain: baseSepolia });
-        return ok(`Withdrew ${fmtUSDC(sharesToRedeem)} raUSDC shares.\nTx: https://base-sepolia.blockscout.com/tx/${hash}`);
+        return ok(`Withdrew ${fmtUSDC(sharesToRedeem)} raUSDC shares.\nTx: https://basescan.org/tx/${hash}`);
       } catch (e: any) { return error(e.message); }
     });
   },
