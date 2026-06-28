@@ -18,7 +18,7 @@ const client = createPublicClient({ chain: baseSepolia, transport: http() });
 const ADDR = {
   vault: "0x00325d9da832b38179ed2f0dabd4062d93e325a7" as `0x${string}`,
   credit: "0x019540E33a0292a9DDE36bD9Ef11774d5A1Ce6FC" as `0x${string}`,
-  router: "0xeC3b7Daa942C03651D55A4A01797498fA6dB728F" as `0x${string}`,
+  router: "0xd0c64f997ca9aa427f8834578bd7f0313f868e83" as `0x${string}`,
   usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as `0x${string}`,
   strategy: "0x43626D6162Ccb12328B989BB228DaD2941F2F12a" as `0x${string}`,
   allocator: "0x7Fd5d7b49694858FCf143E0039e83cDB0196DD7A" as `0x${string}`,
