@@ -54,16 +54,15 @@ export function createArcisServer() {
 const server = new McpServer({ name: "arcis-protocol", version: "0.3.0" });
 
 server.tool("arcis_vault_status", "Get vault TVL, exchange rate, supply, capacity, reserve/deployed", {}, async () => {
-  const [totalAssets, totalSupply, rate, cap, remaining, reserve, deployed, paused] = await Promise.all([
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "totalAssets" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "totalSupply" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "exchangeRate" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "depositCap" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "remainingCapacity" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "reserveBalance" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "deployedBalance" }),
-    client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "paused" }),
-  ]);
+  // Sequential calls to avoid public RPC rate limiting
+  const totalAssets = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "totalAssets" });
+  const totalSupply = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "totalSupply" });
+  const rate = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "exchangeRate" });
+  const cap = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "depositCap" });
+  const remaining = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "remainingCapacity" });
+  const reserve = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "reserveBalance" });
+  const deployed = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "deployedBalance" });
+  const paused = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "paused" });
   const utilPct = cap > 0n ? (Number(totalAssets * 10000n / cap) / 100).toFixed(2) : "0";
   return { content: [{ type: "text" as const, text: `Arcis Vault (Base Mainnet)\nTVL: ${fmtUSDC(totalAssets)}\nraUSDC Supply: ${fmtUSDC(totalSupply)}\nExchange Rate: ${fmtRate(rate)}\nDeposit Cap: ${fmtUSDC(cap)}\nRemaining: ${fmtUSDC(remaining)}\nUtilization: ${utilPct}%\nReserve: ${fmtUSDC(reserve)} | Deployed: ${fmtUSDC(deployed)}\nPaused: ${paused}` }] };
 });
@@ -75,7 +74,7 @@ server.tool("arcis_vault_balance", "Check agent vault position", { agent_address
     client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "balance", args: [addr] }),
     client.readContract({ address: ADDR.usdc, abi: ERC20_ABI, functionName: "balanceOf", args: [addr] }),
   ]);
-  return { content: [{ type: "text" as const, text: `Agent: ${agent_address}\nraUSDC Shares: ${fmtUSDC(shares)}\nPosition Value: ${fmtUSDC(value)}\nUSDC Wallet: ${fmtUSDC(usdcBal)}` }] };
+  return { content: [{ type: "text" as const, text: `Agent: ${agent_address}\nraUSDC Shares: ${Number(shares).toLocaleString()}\nPosition Value: ${fmtUSDC(value)}\nUSDC Wallet: ${fmtUSDC(usdcBal)}` }] };
 });
 
 server.tool("arcis_preview_deposit", "Preview shares for deposit", { amount: z.number() }, async ({ amount }) => {
