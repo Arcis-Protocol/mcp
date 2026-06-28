@@ -1,5 +1,5 @@
-#!/usr/bin/env node
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { server } from "./server.js";
 
-// Local mode: stdio transport for Claude Desktop / Claude Code
-server.listen();
+const transport = new StdioServerTransport();
+await server.connect(transport);
