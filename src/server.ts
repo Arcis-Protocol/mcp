@@ -50,7 +50,8 @@ const ERC20_ABI = [
 const fmtUSDC = (v: bigint) => "$" + (Number(v) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtRate = (v: bigint) => (Number(v) / 1e18).toFixed(6);
 
-export const server = new McpServer({ name: "arcis-protocol", version: "0.3.0" });
+export function createArcisServer() {
+const server = new McpServer({ name: "arcis-protocol", version: "0.3.0" });
 
 server.tool("arcis_vault_status", "Get vault TVL, exchange rate, supply, capacity, reserve/deployed", {}, async () => {
   const [totalAssets, totalSupply, rate, cap, remaining, reserve, deployed, paused] = await Promise.all([
@@ -116,3 +117,9 @@ server.tool("arcis_credit_health", "Check loan health", { loan_id: z.number() },
 server.tool("arcis_contracts", "Get deployed contract addresses", {}, async () => {
   return { content: [{ type: "text" as const, text: `Arcis Protocol (Base Mainnet)\nArcisVault: ${ADDR.vault}\nATIRouter: ${ADDR.router}\nUSDC: ${ADDR.usdc}\nExplorer: https://basescan.org` }] };
 });
+
+return server;
+}
+
+// Singleton for stdio mode
+export const server = createArcisServer();
