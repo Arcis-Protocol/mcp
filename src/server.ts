@@ -48,7 +48,7 @@ const ERC20_ABI = [
 ] as const;
 
 const fmtUSDC = (v: bigint) => "$" + (Number(v) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtRate = (v: bigint) => (Number(v) / 1e18).toFixed(6);
+const fmtRate = (v: bigint) => (Number(v) / 1e24).toFixed(6);
 
 export function createArcisServer() {
 const server = new McpServer({ name: "arcis-protocol", version: "0.3.0" });
