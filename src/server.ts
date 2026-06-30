@@ -64,7 +64,7 @@ server.tool("arcis_vault_status", "Get vault TVL, exchange rate, supply, capacit
   const deployed = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "deployedBalance" });
   const paused = await client.readContract({ address: ADDR.vault, abi: VAULT_ABI, functionName: "paused" });
   const utilPct = cap > 0n ? (Number(totalAssets * 10000n / cap) / 100).toFixed(2) : "0";
-  return { content: [{ type: "text" as const, text: `Arcis Vault (Base Mainnet)\nTVL: ${fmtUSDC(totalAssets)}\nraUSDC Supply: ${fmtUSDC(totalSupply)}\nExchange Rate: ${fmtRate(rate)}\nDeposit Cap: ${fmtUSDC(cap)}\nRemaining: ${fmtUSDC(remaining)}\nUtilization: ${utilPct}%\nReserve: ${fmtUSDC(reserve)} | Deployed: ${fmtUSDC(deployed)}\nPaused: ${paused}` }] };
+  return { content: [{ type: "text" as const, text: `Arcis Vault (Base Mainnet)\nTVL: ${fmtUSDC(totalAssets)}\nraUSDC Supply: ${Number(totalSupply).toLocaleString()} shares\nExchange Rate: ${fmtRate(rate)}\nDeposit Cap: ${fmtUSDC(cap)}\nRemaining: ${fmtUSDC(remaining)}\nUtilization: ${utilPct}%\nReserve: ${fmtUSDC(reserve)} | Deployed: ${fmtUSDC(deployed)}\nPaused: ${paused}` }] };
 });
 
 server.tool("arcis_vault_balance", "Check agent vault position", { agent_address: z.string() }, async ({ agent_address }) => {
