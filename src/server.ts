@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createPublicClient, createWalletClient, http, defineChain, type Address } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 
 const base = defineChain({
   id: 8453, name: "Base",
