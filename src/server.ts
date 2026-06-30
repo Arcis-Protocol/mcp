@@ -6,7 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 const base = defineChain({
   id: 8453, name: "Base",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: ["https://mainnet.base.org"] } },
+  rpcUrls: { default: { http: [process.env.BASE_RPC_URL || "https://mainnet.base.org"] } },
   blockExplorers: { default: { name: "Basescan", url: "https://basescan.org" } },
 });
 
