@@ -113,7 +113,8 @@ server.tool("arcis_credit_health", "Check loan health", { loan_id: z.number() },
 });
 
 server.tool("arcis_contracts", "Get deployed contract addresses", {}, async () => {
-  return { content: [{ type: "text" as const, text: `Arcis Protocol (Base Mainnet)\nArcisVault: ${ADDR.vault}\nATIRouter: ${ADDR.router}\nUSDC: ${ADDR.usdc}\nExplorer: https://basescan.org` }] };
+  return { content: [{ type: "text" as const, text: `Arcis Protocol (Base Mainnet)\nArcisVault: ${ADDR.vault}\nATIRouter: ${ADDR.router}\nUSDC: ${ADDR.usdc}\n$CUSTOS Token: 0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882 (Virtuals)
+Explorer: https://basescan.org` }] };
 });
 
 return server;
