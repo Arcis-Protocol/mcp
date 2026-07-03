@@ -16,10 +16,37 @@ const ADDR = {
   credit: "0xdf31800e620f728297340d66acf5a306f07ce7a1" as Address,
   router: "0xd0c64f997ca9aa427f8834578bd7f0313f868e83" as Address,
   usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address,
+  factory: "0x9f5697eEB94ee1C7CEDfEb2080A9398D42170FBC" as Address,
 };
+
+const FACTORY_ABI = [
+  { name: "vaultCount", type: "function", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
+  { name: "vaultFor", type: "function", inputs: [{ name: "asset", type: "address" }], outputs: [{ type: "address" }], stateMutability: "view" },
+  { name: "vaultInfo", type: "function", inputs: [{ name: "index", type: "uint256" }], outputs: [
+    { name: "vault", type: "address" }, { name: "asset", type: "address" },
+    { name: "name", type: "string" }, { name: "symbol", type: "string" },
+    { name: "totalAssets", type: "uint256" }, { name: "depositCap", type: "uint256" },
+    { name: "paused", type: "bool" },
+  ], stateMutability: "view" },
+] as const;
+
+const TOKEN_ABI = [
+  { name: "balanceOf", type: "function", inputs: [{ name: "a", type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" },
+  { name: "decimals", type: "function", inputs: [], outputs: [{ type: "uint8" }], stateMutability: "view" },
+  { name: "symbol", type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
+] as const;
+
+function fmtToken(raw: bigint, decimals: number): string {
+  const s = raw.toString().padStart(decimals + 1, "0");
+  const whole = s.slice(0, s.length - decimals);
+  const frac = s.slice(s.length - decimals).replace(/0+$/, "").slice(0, 4);
+  return frac ? `${whole}.${frac}` : whole;
+}
 
 const VAULT_ABI = [
   { name: "totalAssets", type: "function", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
+  { name: "asset", type: "function", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
+  { name: "symbol", type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
   { name: "totalSupply", type: "function", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { name: "exchangeRate", type: "function", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
   { name: "depositCap", type: "function", inputs: [], outputs: [{ type: "uint256" }], stateMutability: "view" },
@@ -115,6 +142,55 @@ server.tool("arcis_credit_health", "Check loan health", { loan_id: z.number() },
 server.tool("arcis_contracts", "Get deployed contract addresses", {}, async () => {
   return { content: [{ type: "text" as const, text: `Arcis Protocol (Base Mainnet)\nArcisVault: ${ADDR.vault}\nATIRouter: ${ADDR.router}\nUSDC: ${ADDR.usdc}\n$CUSTOS Token: 0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882 (Virtuals)
 Explorer: https://basescan.org` }] };
+});
+
+server.tool("arcis_list_vaults", "List all agent-token vaults from the Arcis factory registry (symbol, asset, TVL, status)", {}, async () => {
+  const count = await client.readContract({ address: ADDR.factory, abi: FACTORY_ABI, functionName: "vaultCount" }) as bigint;
+  if (count === 0n) {
+    return { content: [{ type: "text" as const, text: "No agent-token vaults deployed yet. The flagship USDC vault is at " + ADDR.vault }] };
+  }
+  const lines: string[] = [`Arcis Agent Vaults (${count} deployed)`];
+  for (let i = 0n; i < count; i++) {
+    const info = await client.readContract({ address: ADDR.factory, abi: FACTORY_ABI, functionName: "vaultInfo", args: [i] }) as readonly [Address, Address, string, string, bigint, bigint, boolean];
+    const [vault, asset, name, symbol, totalAssets, , paused] = info;
+    lines.push(`\n${symbol} — ${name}\n  Vault: ${vault}\n  Asset: ${asset}\n  Deposited: ${totalAssets.toString()} (raw)\n  Status: ${paused ? "paused" : "active"}`);
+  }
+  return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+});
+
+server.tool("arcis_vault_info", "Get details for a specific agent-token vault by vault or asset address, including how to deposit", { vault_or_asset: z.string() }, async ({ vault_or_asset }) => {
+  let vault = vault_or_asset as Address;
+  const viaAsset = await client.readContract({ address: ADDR.factory, abi: FACTORY_ABI, functionName: "vaultFor", args: [vault_or_asset as Address] }) as Address;
+  if (viaAsset && viaAsset !== "0x0000000000000000000000000000000000000000") vault = viaAsset;
+
+  const asset = await client.readContract({ address: vault, abi: VAULT_ABI, functionName: "asset" }) as Address;
+  const [decimals, symbol] = await Promise.all([
+    client.readContract({ address: asset, abi: TOKEN_ABI, functionName: "decimals" }) as Promise<number>,
+    client.readContract({ address: vault, abi: VAULT_ABI, functionName: "symbol" }) as Promise<string>,
+  ]);
+  const totalAssets = await client.readContract({ address: vault, abi: VAULT_ABI, functionName: "totalAssets" }) as bigint;
+  const paused = await client.readContract({ address: vault, abi: VAULT_ABI, functionName: "paused" }) as boolean;
+
+  const text = `Arcis Vault: ${symbol}\nVault: ${vault}\nUnderlying asset: ${asset} (${decimals} decimals)\nTotal deposited: ${fmtToken(totalAssets, Number(decimals))} ${symbol}\nStatus: ${paused ? "paused" : "active"}\n\nTo deposit: approve the vault to spend your token, then call deposit(amount) on the vault. You receive ${symbol} receipt shares 1:1. Withdraw anytime with withdraw(shares).\nCLI: arcis vault deposit-token ${vault} <amount> -k <key>`;
+  return { content: [{ type: "text" as const, text }] };
+});
+
+server.tool("arcis_agent_vault_balance", "Check an agent's position in a specific agent-token vault", { vault_or_asset: z.string(), agent_address: z.string() }, async ({ vault_or_asset, agent_address }) => {
+  let vault = vault_or_asset as Address;
+  const viaAsset = await client.readContract({ address: ADDR.factory, abi: FACTORY_ABI, functionName: "vaultFor", args: [vault_or_asset as Address] }) as Address;
+  if (viaAsset && viaAsset !== "0x0000000000000000000000000000000000000000") vault = viaAsset;
+
+  const asset = await client.readContract({ address: vault, abi: VAULT_ABI, functionName: "asset" }) as Address;
+  const [decimals, symbol] = await Promise.all([
+    client.readContract({ address: asset, abi: TOKEN_ABI, functionName: "decimals" }) as Promise<number>,
+    client.readContract({ address: vault, abi: VAULT_ABI, functionName: "symbol" }) as Promise<string>,
+  ]);
+  const [shares, walletBal] = await Promise.all([
+    client.readContract({ address: vault, abi: VAULT_ABI, functionName: "balanceOf", args: [agent_address as Address] }) as Promise<bigint>,
+    client.readContract({ address: asset, abi: TOKEN_ABI, functionName: "balanceOf", args: [agent_address as Address] }) as Promise<bigint>,
+  ]);
+  const text = `Agent: ${agent_address}\nVault: ${symbol} (${vault})\nVault position: ${fmtToken(shares, Number(decimals))} ${symbol}\nWallet balance: ${fmtToken(walletBal, Number(decimals))} (underlying token)`;
+  return { content: [{ type: "text" as const, text }] };
 });
 
 return server;

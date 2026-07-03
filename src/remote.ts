@@ -118,12 +118,15 @@ const httpServer = createServer(async (req, res) => {
         "function vaultCount() view returns (uint256)",
         "function vaultInfo(uint256) view returns (address,address,string,string,uint256,uint256,bool)",
       ]);
+      const decAbi = pa(["function decimals() view returns (uint8)"]);
       const count = await c.readContract({ address: factory, abi: facAbi, functionName: "vaultCount" }) as bigint;
       const vaults = [];
       for (let i = 0n; i < count; i++) {
         const info = await c.readContract({ address: factory, abi: facAbi, functionName: "vaultInfo", args: [i] }) as [string, string, string, string, bigint, bigint, boolean];
+        let decimals = 18;
+        try { decimals = Number(await c.readContract({ address: info[1] as `0x${string}`, abi: decAbi, functionName: "decimals" })); } catch {}
         vaults.push({
-          vault: info[0], asset: info[1], name: info[2], symbol: info[3],
+          vault: info[0], asset: info[1], name: info[2], symbol: info[3], decimals,
           totalAssets: info[4].toString(), depositCap: info[5].toString(), paused: info[6],
         });
       }
