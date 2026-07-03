@@ -85,6 +85,57 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // ── REST API: agent-token vault registry (factory) ──
+  if (req.url === "/api/vaults" && req.method === "GET") {
+    try {
+      const { createPublicClient: cpc, http: h, defineChain: dc, parseAbi: pa } = await import("viem");
+      const base = dc({ id: 8453, name: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [process.env.BASE_RPC_URL || "https://mainnet.base.org"] } } });
+      const c = cpc({ chain: base, transport: h() });
+
+      const factory = (process.env.VAULT_FACTORY || "0x0000000000000000000000000000000000000000") as `0x${string}`;
+      const ZERO = "0x0000000000000000000000000000000000000000";
+
+      // Pre-deployment: return the flagship USDC vault as the sole entry so
+      // consumers get a stable shape now and richer data after deployment.
+      if (factory === ZERO) {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=10" });
+        res.end(JSON.stringify({
+          factory: null,
+          count: 1,
+          vaults: [{
+            vault: "0x00325d9da832b38179ed2f0dabd4062d93e325a7",
+            asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            name: "Arcis USDC",
+            symbol: "raUSDC",
+            flagship: true,
+          }],
+          timestamp: Date.now(),
+        }));
+        return;
+      }
+
+      const facAbi = pa([
+        "function vaultCount() view returns (uint256)",
+        "function vaultInfo(uint256) view returns (address,address,string,string,uint256,uint256,bool)",
+      ]);
+      const count = await c.readContract({ address: factory, abi: facAbi, functionName: "vaultCount" }) as bigint;
+      const vaults = [];
+      for (let i = 0n; i < count; i++) {
+        const info = await c.readContract({ address: factory, abi: facAbi, functionName: "vaultInfo", args: [i] }) as [string, string, string, string, bigint, bigint, boolean];
+        vaults.push({
+          vault: info[0], asset: info[1], name: info[2], symbol: info[3],
+          totalAssets: info[4].toString(), depositCap: info[5].toString(), paused: info[6],
+        });
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=10" });
+      res.end(JSON.stringify({ factory, count: Number(count), vaults, timestamp: Date.now() }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   if (req.url === "/mcp" && req.method === "POST") {
     try {
       const server = createArcisServer();
