@@ -65,8 +65,11 @@ CUSTOS (the Arcis keeper agent) uses the same contract interfaces. If CUSTOS can
 |---|---|
 | [`core`](https://github.com/Arcis-Protocol/core) | Smart contracts — 17 contracts, 116 tests |
 | [`sdk`](https://github.com/Arcis-Protocol/sdk) | `@arcisprotocol/sdk` |
+| [`integrations`](https://github.com/Arcis-Protocol/integrations) | Framework & runtime integrations (npm + PyPI) |
 | [`custos`](https://github.com/Arcis-Protocol/custos) | CUSTOS — autonomous keeper agent |
-| [`docs`](https://github.com/Arcis-Protocol/docs) | ATI v1.1, integration guide, SDK examples |
+| [`docs`](https://github.com/Arcis-Protocol/docs) | ATI v1.1, integration guide, demo scripts |
+
+Any of the framework packages in [`integrations`](https://github.com/Arcis-Protocol/integrations) can talk to this server, and any MCP client can connect directly at `https://mcp.arcis.money/mcp`.
 
 ---
 
