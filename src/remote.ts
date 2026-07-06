@@ -39,9 +39,9 @@ async function rpc(url: string, method: string, params: any[], retries = 3): Pro
 // Alchemy-style transfer pull (one call per direction, no chunking).
 async function assetTransfers(url: string, from: string, to: string) {
   const res = await rpc(url, "alchemy_getAssetTransfers", [{
-    fromBlock: "0x0", toBlock: "latest", fromAddress: from, toAddress: to,
+    fromBlock: "0x2d97244", toBlock: "latest", fromAddress: from, toAddress: to, // vault deploy block — NOT 0x0 (scanning all history is what got throttled)
     contractAddresses: [USDC_ADDR], category: ["erc20"], excludeZeroValue: true,
-    withMetadata: true, maxCount: "0x3e8", order: "asc",
+    maxCount: "0x3e8", order: "asc",
   }]);
   return res?.transfers || [];
 }
@@ -53,13 +53,17 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
   try {
     const dep = await assetTransfers(url, user, VAULT_ADDR);
     const wd = await assetTransfers(url, VAULT_ADDR, user);
-    let net = 0n; let firstTs: number | null = null;
+    let net = 0n; let firstBlock: number | null = null;
     for (const t of dep) {
       net += BigInt(t.rawContract?.value ?? "0x0");
-      const ts = t.metadata?.blockTimestamp ? Math.floor(new Date(t.metadata.blockTimestamp).getTime() / 1000) : null;
-      if (ts && (firstTs === null || ts < firstTs)) firstTs = ts;
+      const bn = t.blockNum ? parseInt(t.blockNum, 16) : null;
+      if (bn && (firstBlock === null || bn < firstBlock)) firstBlock = bn;
     }
     for (const t of wd) net -= BigInt(t.rawContract?.value ?? "0x0");
+    let firstTs: number | null = null;
+    if (firstBlock !== null) {
+      try { const blk = await rpc(url, "eth_getBlockByNumber", ["0x" + firstBlock.toString(16), false]); if (blk?.timestamp) firstTs = parseInt(blk.timestamp, 16); } catch {}
+    }
     return { net, firstTs, source: "getAssetTransfers" };
   } catch (e: any) { errs.getAssetTransfers = String(e?.message || e).slice(0, 160); }
   // 2) Fallback: full-range getLogs (works on providers that allow it)
