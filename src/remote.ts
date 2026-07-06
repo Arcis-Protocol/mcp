@@ -8,7 +8,7 @@ const PORT = parseInt(process.env.PORT || "3001");
 const USDC_ADDR = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const VAULT_ADDR = "0x00325d9da832b38179ed2f0dabd4062d93e325a7";
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const positionCache = new Map<string, { at: number; data: any }>();
+const positionCache = new Map<string, { at: number; net: string | null; firstTs: number | null; source: string }>();
 
 function topicAddr(a: string) { return "0x" + a.slice(2).toLowerCase().padStart(64, "0"); }
 
@@ -227,28 +227,60 @@ const httpServer = createServer(async (req, res) => {
       }
 
       const now = Date.now();
-      const cached = positionCache.get(address);
-      if (cached && now - cached.at < 300_000) {
-        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=30" });
-        res.end(JSON.stringify(cached.data)); return;
-      }
-
       const rpcUrl = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+      let rpcHost = "unknown"; try { rpcHost = new URL(rpcUrl).host; } catch {}
       const { createPublicClient: cpc, http: h, defineChain: dc, parseAbi: pa } = await import("viem");
       const base = dc({ id: 8453, name: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } });
       const c = cpc({ chain: base, transport: h() });
       const vault = VAULT_ADDR as `0x${string}`;
-      const vaultAbi = pa(["function balanceOf(address) view returns (uint256)", "function convertToAssets(uint256) view returns (uint256)"]);
+      const vaultAbi = pa([
+        "function balanceOf(address) view returns (uint256)",
+        "function convertToAssets(uint256) view returns (uint256)",
+        "function reserveBalance() view returns (uint256)",
+        "function deployedBalance() view returns (uint256)",
+        "function feeBps() view returns (uint256)",
+        "function strategyCount() view returns (uint256)",
+        "function strategies(uint256) view returns (address)",
+      ]);
+      const stratAbi = pa(["function totalValue() view returns (uint256)"]);
 
-      const shares = await c.readContract({ address: vault, abi: vaultAbi, functionName: "balanceOf", args: [address as `0x${string}`] }) as bigint;
-      const value = shares > 0n ? await c.readContract({ address: vault, abi: vaultAbi, functionName: "convertToAssets", args: [shares] }) as bigint : 0n;
+      // ── fresh, cheap reads → LIVE value (accrues every block, no harvest needed) ──
+      const [shares, reserveBalance, deployedBalance, feeBps, stratCount] = await Promise.all([
+        c.readContract({ address: vault, abi: vaultAbi, functionName: "balanceOf", args: [address as `0x${string}`] }) as Promise<bigint>,
+        c.readContract({ address: vault, abi: vaultAbi, functionName: "reserveBalance" }) as Promise<bigint>,
+        c.readContract({ address: vault, abi: vaultAbi, functionName: "deployedBalance" }) as Promise<bigint>,
+        c.readContract({ address: vault, abi: vaultAbi, functionName: "feeBps" }) as Promise<bigint>,
+        c.readContract({ address: vault, abi: vaultAbi, functionName: "strategyCount" }) as Promise<bigint>,
+      ]);
+      const cachedValue = shares > 0n ? (await c.readContract({ address: vault, abi: vaultAbi, functionName: "convertToAssets", args: [shares] }) as bigint) : 0n;
 
-      const { net, firstTs, source, errs } = await netDeposited(rpcUrl, address);
-      let rpcHost = "unknown"; try { rpcHost = new URL(rpcUrl).host; } catch {}
+      // sum LIVE value across every strategy (includes unrealized Aave yield)
+      let liveDeployed = 0n;
+      for (let i = 0n; i < stratCount; i++) {
+        try {
+          const strat = await c.readContract({ address: vault, abi: vaultAbi, functionName: "strategies", args: [i] }) as `0x${string}`;
+          liveDeployed += await c.readContract({ address: strat, abi: stratAbi, functionName: "totalValue" }) as bigint;
+        } catch {}
+      }
+      const cachedTotalAssets = reserveBalance + deployedBalance;
+      const pendingYield = liveDeployed > deployedBalance ? liveDeployed - deployedBalance : 0n;         // unrealized, not yet harvested
+      const netPending = feeBps < 10000n ? (pendingYield * (10000n - feeBps)) / 10000n : pendingYield;   // after the harvest fee dilution
+      // depositor's live value = realized value + their pro-rata share of net pending yield
+      const liveValue = cachedTotalAssets > 0n ? cachedValue + (cachedValue * netPending) / cachedTotalAssets : cachedValue;
+
+      // ── net deposited (expensive getAssetTransfers; cached 5 min) ──
+      let net: bigint | null = null, firstTs: number | null = null, source = "unavailable", errs: any;
+      const nd = positionCache.get(address);
+      if (nd && now - nd.at < 300_000) { net = nd.net === null ? null : BigInt(nd.net); firstTs = nd.firstTs; source = nd.source; }
+      else {
+        const r = await netDeposited(rpcUrl, address);
+        net = r.net; firstTs = r.firstTs; source = r.source; errs = r.errs;
+        if (net !== null) positionCache.set(address, { at: now, net: net.toString(), firstTs, source });
+      }
 
       let earned: string | null = null, earnedPct: number | null = null;
       if (net !== null) {
-        const e = value - net;
+        const e = liveValue - net;                        // live earnings — ticks up between harvests
         earned = e.toString();
         earnedPct = net > 0n ? Number((e * 1000000n) / net) / 10000 : null;
       }
@@ -256,18 +288,18 @@ const httpServer = createServer(async (req, res) => {
       const data = {
         address,
         shares: shares.toString(),
-        value: value.toString(),          // current redeemable USDC (6dp)
+        value: cachedValue.toString(),        // realized / withdrawable-now (6dp)
+        liveValue: liveValue.toString(),      // live economic value incl. unrealized yield, net of fee (6dp)
+        pendingYield: pendingYield.toString(),
         netDeposited: net === null ? null : net.toString(),
-        earned,                           // value - netDeposited (6dp), null if history unavailable
-        earnedPct,                        // percentage, e.g. 1.83
+        earned,                               // liveValue - netDeposited (6dp)
+        earnedPct,
         firstDepositTs: firstTs,
-        source,                           // getAssetTransfers | getLogs | unavailable
-        rpcHost,                          // which RPC the running server actually uses (no key)
+        source, rpcHost,
         ...(source === "unavailable" ? { debug: errs } : {}),
         timestamp: now,
       };
-      positionCache.set(address, { at: now, data });
-      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=30" });
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=15" });
       res.end(JSON.stringify(data));
     } catch (e: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
