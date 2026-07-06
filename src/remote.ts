@@ -30,7 +30,8 @@ async function assetTransfers(url: string, from: string, to: string) {
 }
 
 // Returns net USDC deposited (in → out), first-deposit timestamp, and the source used.
-async function netDeposited(url: string, user: string): Promise<{ net: bigint | null; firstTs: number | null; source: string }> {
+async function netDeposited(url: string, user: string): Promise<{ net: bigint | null; firstTs: number | null; source: string; errs?: any }> {
+  const errs: any = {};
   // 1) Alchemy getAssetTransfers — robust, no range caps
   try {
     const [dep, wd] = await Promise.all([assetTransfers(url, user, VAULT_ADDR), assetTransfers(url, VAULT_ADDR, user)]);
@@ -42,7 +43,7 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
     }
     for (const t of wd) net -= BigInt(t.rawContract?.value ?? "0x0");
     return { net, firstTs, source: "getAssetTransfers" };
-  } catch {}
+  } catch (e: any) { errs.getAssetTransfers = String(e?.message || e).slice(0, 160); }
   // 2) Fallback: full-range getLogs (works on providers that allow it)
   try {
     const [dep, wd] = await Promise.all([
@@ -53,8 +54,8 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
     for (const l of dep) net += BigInt(l.data);
     for (const l of wd) net -= BigInt(l.data);
     return { net, firstTs: null, source: "getLogs" };
-  } catch {}
-  return { net: null, firstTs: null, source: "unavailable" };
+  } catch (e: any) { errs.getLogs = String(e?.message || e).slice(0, 160); }
+  return { net: null, firstTs: null, source: "unavailable", errs };
 }
 
 
@@ -220,7 +221,8 @@ const httpServer = createServer(async (req, res) => {
       const shares = await c.readContract({ address: vault, abi: vaultAbi, functionName: "balanceOf", args: [address as `0x${string}`] }) as bigint;
       const value = shares > 0n ? await c.readContract({ address: vault, abi: vaultAbi, functionName: "convertToAssets", args: [shares] }) as bigint : 0n;
 
-      const { net, firstTs, source } = await netDeposited(rpcUrl, address);
+      const { net, firstTs, source, errs } = await netDeposited(rpcUrl, address);
+      let rpcHost = "unknown"; try { rpcHost = new URL(rpcUrl).host; } catch {}
 
       let earned: string | null = null, earnedPct: number | null = null;
       if (net !== null) {
@@ -238,6 +240,8 @@ const httpServer = createServer(async (req, res) => {
         earnedPct,                        // percentage, e.g. 1.83
         firstDepositTs: firstTs,
         source,                           // getAssetTransfers | getLogs | unavailable
+        rpcHost,                          // which RPC the running server actually uses (no key)
+        ...(source === "unavailable" ? { debug: errs } : {}),
         timestamp: now,
       };
       positionCache.set(address, { at: now, data });
