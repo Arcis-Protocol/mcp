@@ -12,11 +12,28 @@ const positionCache = new Map<string, { at: number; data: any }>();
 
 function topicAddr(a: string) { return "0x" + a.slice(2).toLowerCase().padStart(64, "0"); }
 
-async function rpc(url: string, method: string, params: any[]): Promise<any> {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-  const j = await r.json();
-  if (j.error) throw new Error(j.error.message || "rpc error");
-  return j.result;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const isTransient = (m: string) => /rate.?limit|429|high global traffic|throughput|temporarily|exceeded|capacity|too many/i.test(m);
+
+async function rpc(url: string, method: string, params: any[], retries = 3): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+      const j = await r.json();
+      if (j.error) {
+        const msg = j.error.message || "rpc error";
+        if (isTransient(msg) && i < retries) { await sleep(600 * Math.pow(2, i)); continue; }
+        throw new Error(msg);
+      }
+      return j.result;
+    } catch (e: any) {
+      lastErr = e;
+      if (isTransient(String(e?.message || e)) && i < retries) { await sleep(600 * Math.pow(2, i)); continue; }
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 // Alchemy-style transfer pull (one call per direction, no chunking).
@@ -34,7 +51,8 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
   const errs: any = {};
   // 1) Alchemy getAssetTransfers — robust, no range caps
   try {
-    const [dep, wd] = await Promise.all([assetTransfers(url, user, VAULT_ADDR), assetTransfers(url, VAULT_ADDR, user)]);
+    const dep = await assetTransfers(url, user, VAULT_ADDR);
+    const wd = await assetTransfers(url, VAULT_ADDR, user);
     let net = 0n; let firstTs: number | null = null;
     for (const t of dep) {
       net += BigInt(t.rawContract?.value ?? "0x0");
@@ -206,7 +224,7 @@ const httpServer = createServer(async (req, res) => {
 
       const now = Date.now();
       const cached = positionCache.get(address);
-      if (cached && now - cached.at < 60_000) {
+      if (cached && now - cached.at < 300_000) {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=30" });
         res.end(JSON.stringify(cached.data)); return;
       }
