@@ -4,6 +4,60 @@ import { createArcisServer } from "./server.js";
 
 const PORT = parseInt(process.env.PORT || "3001");
 
+// ── Per-address position helpers (net deposited → accrued rewards) ──
+const USDC_ADDR = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const VAULT_ADDR = "0x00325d9da832b38179ed2f0dabd4062d93e325a7";
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const positionCache = new Map<string, { at: number; data: any }>();
+
+function topicAddr(a: string) { return "0x" + a.slice(2).toLowerCase().padStart(64, "0"); }
+
+async function rpc(url: string, method: string, params: any[]): Promise<any> {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || "rpc error");
+  return j.result;
+}
+
+// Alchemy-style transfer pull (one call per direction, no chunking).
+async function assetTransfers(url: string, from: string, to: string) {
+  const res = await rpc(url, "alchemy_getAssetTransfers", [{
+    fromBlock: "0x0", toBlock: "latest", fromAddress: from, toAddress: to,
+    contractAddresses: [USDC_ADDR], category: ["erc20"], excludeZeroValue: true,
+    withMetadata: true, maxCount: "0x3e8", order: "asc",
+  }]);
+  return res?.transfers || [];
+}
+
+// Returns net USDC deposited (in → out), first-deposit timestamp, and the source used.
+async function netDeposited(url: string, user: string): Promise<{ net: bigint | null; firstTs: number | null; source: string }> {
+  // 1) Alchemy getAssetTransfers — robust, no range caps
+  try {
+    const [dep, wd] = await Promise.all([assetTransfers(url, user, VAULT_ADDR), assetTransfers(url, VAULT_ADDR, user)]);
+    let net = 0n; let firstTs: number | null = null;
+    for (const t of dep) {
+      net += BigInt(t.rawContract?.value ?? "0x0");
+      const ts = t.metadata?.blockTimestamp ? Math.floor(new Date(t.metadata.blockTimestamp).getTime() / 1000) : null;
+      if (ts && (firstTs === null || ts < firstTs)) firstTs = ts;
+    }
+    for (const t of wd) net -= BigInt(t.rawContract?.value ?? "0x0");
+    return { net, firstTs, source: "getAssetTransfers" };
+  } catch {}
+  // 2) Fallback: full-range getLogs (works on providers that allow it)
+  try {
+    const [dep, wd] = await Promise.all([
+      rpc(url, "eth_getLogs", [{ address: USDC_ADDR, topics: [TRANSFER_TOPIC, topicAddr(user), topicAddr(VAULT_ADDR)], fromBlock: "0x2d97244", toBlock: "latest" }]),
+      rpc(url, "eth_getLogs", [{ address: USDC_ADDR, topics: [TRANSFER_TOPIC, topicAddr(VAULT_ADDR), topicAddr(user)], fromBlock: "0x2d97244", toBlock: "latest" }]),
+    ]);
+    let net = 0n;
+    for (const l of dep) net += BigInt(l.data);
+    for (const l of wd) net -= BigInt(l.data);
+    return { net, firstTs: null, source: "getLogs" };
+  } catch {}
+  return { net: null, firstTs: null, source: "unavailable" };
+}
+
+
 const httpServer = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -132,6 +186,63 @@ const httpServer = createServer(async (req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=10" });
       res.end(JSON.stringify({ factory, count: Number(count), vaults, timestamp: Date.now() }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // ── REST API: per-address position + accrued rewards ──
+  if (req.url?.startsWith("/api/position") && req.method === "GET") {
+    try {
+      const q = new URL(req.url, "http://localhost");
+      const address = (q.searchParams.get("address") || "").toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(address)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid address" })); return;
+      }
+
+      const now = Date.now();
+      const cached = positionCache.get(address);
+      if (cached && now - cached.at < 60_000) {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=30" });
+        res.end(JSON.stringify(cached.data)); return;
+      }
+
+      const rpcUrl = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+      const { createPublicClient: cpc, http: h, defineChain: dc, parseAbi: pa } = await import("viem");
+      const base = dc({ id: 8453, name: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } });
+      const c = cpc({ chain: base, transport: h() });
+      const vault = VAULT_ADDR as `0x${string}`;
+      const vaultAbi = pa(["function balanceOf(address) view returns (uint256)", "function convertToAssets(uint256) view returns (uint256)"]);
+
+      const shares = await c.readContract({ address: vault, abi: vaultAbi, functionName: "balanceOf", args: [address as `0x${string}`] }) as bigint;
+      const value = shares > 0n ? await c.readContract({ address: vault, abi: vaultAbi, functionName: "convertToAssets", args: [shares] }) as bigint : 0n;
+
+      const { net, firstTs, source } = await netDeposited(rpcUrl, address);
+
+      let earned: string | null = null, earnedPct: number | null = null;
+      if (net !== null) {
+        const e = value - net;
+        earned = e.toString();
+        earnedPct = net > 0n ? Number((e * 1000000n) / net) / 10000 : null;
+      }
+
+      const data = {
+        address,
+        shares: shares.toString(),
+        value: value.toString(),          // current redeemable USDC (6dp)
+        netDeposited: net === null ? null : net.toString(),
+        earned,                           // value - netDeposited (6dp), null if history unavailable
+        earnedPct,                        // percentage, e.g. 1.83
+        firstDepositTs: firstTs,
+        source,                           // getAssetTransfers | getLogs | unavailable
+        timestamp: now,
+      };
+      positionCache.set(address, { at: now, data });
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "public, max-age=30" });
+      res.end(JSON.stringify(data));
     } catch (e: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
