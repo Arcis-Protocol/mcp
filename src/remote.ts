@@ -81,6 +81,134 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
 }
 
 
+const CREDIT_ADDR = "0xdf31800e620f728297340d66acf5a306f07ce7a1";
+const CUSTOS_TOKEN = "0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882";
+
+// Tools CUSTOS can call mid-conversation (Anthropic tool schemas).
+const CUSTOS_TOOLS = [
+  { name: "vault_status", description: "Live Arcis vault status: TVL, net APY, exchange rate, reserve vs deployed, remaining capacity, paused.", input_schema: { type: "object", properties: {} } },
+  { name: "get_position", description: "A wallet's Arcis position and rewards: current value, live value (incl. unrealized yield), net deposited, earned. Use whenever the user asks about their position, balance, or rewards.", input_schema: { type: "object", properties: { address: { type: "string", description: "0x wallet address" } }, required: ["address"] } },
+  { name: "credit_status", description: "AgentCredit lending pool: available liquidity, total borrowed, base rate.", input_schema: { type: "object", properties: {} } },
+  { name: "credit_tiers", description: "ERC-8004 reputation tiers with their collateral ratios and rate discounts.", input_schema: { type: "object", properties: {} } },
+  { name: "preview_deposit", description: "Preview raUSDC shares received for depositing a given USDC amount.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount" } }, required: ["amount"] } },
+  { name: "contracts", description: "Arcis on-chain contract addresses on Base.", input_schema: { type: "object", properties: {} } },
+  { name: "custos_offerings", description: "CUSTOS's ACP service catalog and the Managed Treasury subscription — everything CUSTOS can be hired to do.", input_schema: { type: "object", properties: {} } },
+];
+
+const CUSTOS_OFFERINGS_TEXT = JSON.stringify({
+  flagship: { name: "Managed Treasury — CUSTOS Steward", price: "250 USDC / month", does: "CUSTOS runs your entire treasury: idle-capital deployment, yield capture, credit-headroom management, liquidity guarding, risk alerts, per-cycle digest." },
+  categories: {
+    yield: ["rewards-statement", "apy-forecast", "reserve-health", "deposit-optimizer", "harvest-status", "yield-comparison"],
+    credit: ["reputation-lookup", "borrow-simulation", "loan-health-monitor", "credit-setup"],
+    bonds: ["bond-structuring", "bond-health", "bond-investor-brief"],
+    keeperOps: ["keeper-as-a-service", "gas-sentinel", "treasury-digest"],
+    discoveryIdentity: ["kya-check", "identity-registration", "peer-benchmark", "vault-discovery"],
+    market: ["market-brief", "yield-radar"],
+    integration: ["ati-integration-audit", "mcp-setup", "integration-walkthrough"],
+    advisory: ["strategy-session", "treasury-report", "treasury-management", "treasury-close"],
+  },
+  total: "37 offerings, settled in USDC over ACP",
+});
+
+let _toolClient: any = null;
+async function toolClient() {
+  if (_toolClient) return _toolClient;
+  const { createPublicClient, http, defineChain } = await import("viem");
+  const rpcUrl = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+  const chain = defineChain({ id: 8453, name: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } });
+  _toolClient = createPublicClient({ chain, transport: http() });
+  return _toolClient;
+}
+
+async function runCustosTool(name: string, input: any, origin: string): Promise<string> {
+  try {
+    if (name === "vault_status") return await (await fetch(`${origin}/api/vault`)).text();
+    if (name === "get_position") {
+      const a = String(input?.address || "");
+      if (!/^0x[0-9a-fA-F]{40}$/.test(a)) return "Invalid or missing address.";
+      return await (await fetch(`${origin}/api/position?address=${a}`)).text();
+    }
+    if (name === "contracts") return JSON.stringify({ vault: VAULT_ADDR, agentCredit: CREDIT_ADDR, usdc: USDC_ADDR, custosToken: CUSTOS_TOKEN, chain: "Base mainnet (8453)", explorer: "https://basescan.org" });
+    if (name === "custos_offerings") return CUSTOS_OFFERINGS_TEXT;
+
+    const { parseAbi } = await import("viem");
+    const c = await toolClient();
+    if (name === "credit_status") {
+      const abi = parseAbi(["function lendingPool() view returns (uint256)", "function totalBorrowed() view returns (uint256)", "function baseRateBps() view returns (uint256)"]);
+      const [pool, borrowed, rate] = await Promise.all([
+        c.readContract({ address: CREDIT_ADDR, abi, functionName: "lendingPool" }),
+        c.readContract({ address: CREDIT_ADDR, abi, functionName: "totalBorrowed" }),
+        c.readContract({ address: CREDIT_ADDR, abi, functionName: "baseRateBps" }),
+      ]);
+      return JSON.stringify({ availableLiquidityUsdc: Number(pool) / 1e6, totalBorrowedUsdc: Number(borrowed) / 1e6, baseRatePct: Number(rate) / 100 });
+    }
+    if (name === "credit_tiers") {
+      const abi = parseAbi(["function collateralRatios(uint256) view returns (uint256)", "function rateDiscounts(uint256) view returns (uint256)"]);
+      const tiers = ["I", "II", "III", "IV"]; const out: any[] = [];
+      for (let i = 0; i < 4; i++) {
+        try {
+          const [cr, rd] = await Promise.all([
+            c.readContract({ address: CREDIT_ADDR, abi, functionName: "collateralRatios", args: [BigInt(i)] }),
+            c.readContract({ address: CREDIT_ADDR, abi, functionName: "rateDiscounts", args: [BigInt(i)] }),
+          ]);
+          out.push({ tier: tiers[i], collateralRatioPct: Number(cr) / 100, rateDiscountPct: Number(rd) / 100 });
+        } catch {}
+      }
+      return JSON.stringify(out);
+    }
+    if (name === "preview_deposit") {
+      const amt = Math.max(0, Number(input?.amount || 0));
+      const abi = parseAbi(["function previewDeposit(uint256) view returns (uint256)"]);
+      const shares = await c.readContract({ address: VAULT_ADDR, abi, functionName: "previewDeposit", args: [BigInt(Math.round(amt * 1e6))] });
+      return JSON.stringify({ depositUsdc: amt, sharesRaUSDC: Number(shares) / 1e6 });
+    }
+    return "Unknown tool.";
+  } catch (e: any) {
+    return `Tool error: ${String(e?.message || e).slice(0, 160)}`;
+  }
+}
+
+// One streamed Anthropic round: forwards text deltas to the client, returns the
+// assembled assistant content + any tool calls + stop reason.
+async function streamRound(apiKey: string, model: string, system: string, messages: any[], sse: (o: any) => void): Promise<{ assistantContent: any[]; toolUses: any[]; stopReason: string | null }> {
+  const ar = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model, max_tokens: 1024, system, messages, tools: CUSTOS_TOOLS, stream: true }),
+  });
+  if (!ar.ok || !ar.body) { const e = await ar.text().catch(() => ""); throw new Error(`anthropic ${ar.status}: ${e.slice(0, 160)}`); }
+  const reader = ar.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  const blocks: Record<number, any> = {}; let stopReason: string | null = null;
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const evt = buf.slice(0, i); buf = buf.slice(i + 2);
+      const dl = evt.split("\n").find((l) => l.startsWith("data:")); if (!dl) continue;
+      const p = dl.slice(5).trim(); if (!p || p === "[DONE]") continue;
+      let j: any; try { j = JSON.parse(p); } catch { continue; }
+      if (j.type === "content_block_start") {
+        const cb = j.content_block || {};
+        blocks[j.index] = cb.type === "tool_use" ? { type: "tool_use", id: cb.id, name: cb.name, json: "" } : { type: "text", text: "" };
+      } else if (j.type === "content_block_delta") {
+        const b = blocks[j.index]; if (!b) continue;
+        if (j.delta?.type === "text_delta") { b.text += j.delta.text; sse({ t: j.delta.text }); }
+        else if (j.delta?.type === "input_json_delta") { b.json += j.delta.partial_json; }
+      } else if (j.type === "message_delta" && j.delta?.stop_reason) {
+        stopReason = j.delta.stop_reason;
+      }
+    }
+  }
+  const assistantContent: any[] = []; const toolUses: any[] = [];
+  for (const k of Object.keys(blocks).map(Number).sort((a, b) => a - b)) {
+    const b = blocks[k];
+    if (b.type === "text" && b.text) assistantContent.push({ type: "text", text: b.text });
+    else if (b.type === "tool_use") { let inp = {}; try { inp = b.json ? JSON.parse(b.json) : {}; } catch {} assistantContent.push({ type: "tool_use", id: b.id, name: b.name, input: inp }); toolUses.push({ id: b.id, name: b.name, input: inp }); }
+  }
+  return { assistantContent, toolUses, stopReason };
+}
+
 const httpServer = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -342,6 +470,8 @@ Arcis in brief: idle USDC is put to work. Three primitives — Agent Vaults (ERC
 
 Live data (use these exact figures; never invent numbers): ${snapshot}. ${posLine}
 
+Tools: You can read live on-chain data with your tools — vault status, any wallet's position and rewards, credit status and reputation tiers, deposit previews, contract addresses, and your own ACP service catalog. Call them whenever the user asks for specifics, a quote, or their own position; never guess a number you can look up.
+
 Rules: Be accurate and brief — a few sentences, not an essay. Use only the live figures given; if you lack a number, say so and point to the dashboard (arcis.money/dashboard) or docs (docs.arcis.money). You are not a licensed financial advisor: explain the protocol, read on-chain data, and guide actions, but give no personalized investment advice, and never move funds through chat — direct the user to the dashboard or the ATI to act. No emojis, no hype.`;
 
       const trimmed = (Array.isArray(messages) ? messages : []).slice(-12).map((m: any) => ({
@@ -350,35 +480,23 @@ Rules: Be accurate and brief — a few sentences, not an essay. Use only the liv
       }));
       if (trimmed.length === 0) trimmed.push({ role: "user", content: "Who are you?" });
 
-      const ar = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: process.env.CUSTOS_CHAT_MODEL || "claude-sonnet-5", max_tokens: 700, system, messages: trimmed, stream: true }),
-      });
-      if (!ar.ok || !ar.body) {
-        const err = await ar.text().catch(() => "");
-        console.error("[custos-chat]", ar.status, err.slice(0, 200));
-        sse({ t: "CUSTOS is unavailable right now." }); sse({ done: true }); res.end(); return;
-      }
-      const reader = ar.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf("\n\n")) >= 0) {
-          const evt = buf.slice(0, i); buf = buf.slice(i + 2);
-          const dataLine = evt.split("\n").find((l) => l.startsWith("data:"));
-          if (!dataLine) continue;
-          const payload = dataLine.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-          try {
-            const j = JSON.parse(payload);
-            if (j.type === "content_block_delta" && j.delta?.type === "text_delta") sse({ t: j.delta.text });
-          } catch {}
+      const model = process.env.CUSTOS_CHAT_MODEL || "claude-sonnet-5";
+      let convo: any[] = trimmed;
+      try {
+        for (let round = 0; round < 4; round++) {
+          const { assistantContent, toolUses, stopReason } = await streamRound(apiKey, model, system, convo, sse);
+          if (stopReason !== "tool_use" || toolUses.length === 0) break;
+          sse({ tools: toolUses.map((t) => t.name) });
+          const results: any[] = [];
+          for (const tu of toolUses) {
+            const out = await runCustosTool(tu.name, tu.input, origin);
+            results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
+          }
+          convo = [...convo, { role: "assistant", content: assistantContent }, { role: "user", content: results }];
         }
+      } catch (err: any) {
+        console.error("[custos-chat]", String(err?.message || err).slice(0, 200));
+        sse({ t: "\n\nCUSTOS is unavailable right now." });
       }
       sse({ done: true }); res.end();
     } catch (e: any) {
