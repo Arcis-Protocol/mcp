@@ -274,23 +274,33 @@ const SESSION_SECRET = process.env.CUSTOS_SESSION_SECRET || randomBytes(32).toSt
 const SESSION_TTL_MS = 24 * 3600 * 1000;
 const RL_WINDOW_MS = 3600 * 1000; // 1 hour
 
-const gnum = (k: string, d: number) => { const v = Number(process.env[k]); return Number.isFinite(v) && v > 0 ? v : d; };
-const GOV = {
-  anonLimit: gnum("CUSTOS_ANON_LIMIT", 6),      // messages/hour, no wallet
-  holderBase: gnum("CUSTOS_HOLDER_BASE", 25),   // floor for any holder/depositor
-  stepUnit: gnum("CUSTOS_STEP_UNIT", 1000),     // $CUSTOS per step
-  stepMsgs: gnum("CUSTOS_STEP_MSGS", 5),        // +messages per step  (more you hold → more)
-  cap: gnum("CUSTOS_MAX_LIMIT", 600),
-  t1: gnum("CUSTOS_TIER1", 1000), t2: gnum("CUSTOS_TIER2", 10000),
-  t3: gnum("CUSTOS_TIER3", 100000), t4: gnum("CUSTOS_TIER4", 1000000),
+// Governance ladder — one JSON env (CUSTOS_GOVERNANCE) instead of many vars.
+const GOV_DEFAULT: any = {
+  anonLimit: 6, base: 25, cap: 600,
+  step: { tokens: 1000, msgs: 5 },   // +msgs per `tokens` $CUSTOS held (more you hold → more)
+  tiers: [
+    { name: "Citizen", min: 0 },
+    { name: "Patron", min: 1000 },
+    { name: "Praetor", min: 10000 },
+    { name: "Consul", min: 100000 },
+    { name: "Censor", min: 1000000 },
+  ],
 };
+function loadGov(): any {
+  if (!process.env.CUSTOS_GOVERNANCE) return GOV_DEFAULT;
+  try {
+    const p = JSON.parse(process.env.CUSTOS_GOVERNANCE);
+    const g = { ...GOV_DEFAULT, ...p, step: { ...GOV_DEFAULT.step, ...(p.step || {}) } };
+    if (Array.isArray(p.tiers) && p.tiers.length) g.tiers = p.tiers.slice().sort((a: any, b: any) => a.min - b.min);
+    return g;
+  } catch (e: any) { console.error("[gov] invalid CUSTOS_GOVERNANCE json — using defaults:", e.message); return GOV_DEFAULT; }
+}
+const GOV = loadGov();
 function tierName(weight: number, isDepositor: boolean): string {
-  if (weight >= GOV.t4) return "Censor";
-  if (weight >= GOV.t3) return "Consul";
-  if (weight >= GOV.t2) return "Praetor";
-  if (weight >= GOV.t1) return "Patron";
-  if (weight > 0 || isDepositor) return "Citizen";
-  return "Visitor";
+  if (!(weight > 0) && !isDepositor) return "Visitor";
+  let name = GOV.tiers[0]?.name || "Citizen";
+  for (const t of GOV.tiers) { if (weight >= t.min) name = t.name; else break; }
+  return name;
 }
 async function governanceFor(address: string) {
   const { parseAbi } = await import("viem");
@@ -308,7 +318,7 @@ async function governanceFor(address: string) {
   } catch {}
   const isDepositor = shares > 0n;
   const hasStake = weight > 0 || isDepositor;
-  const hourlyLimit = hasStake ? Math.min(GOV.cap, GOV.holderBase + Math.floor(weight / GOV.stepUnit) * GOV.stepMsgs) : GOV.anonLimit;
+  const hourlyLimit = hasStake ? Math.min(GOV.cap, GOV.base + Math.floor(weight / GOV.step.tokens) * GOV.step.msgs) : GOV.anonLimit;
   return { tier: tierName(weight, isDepositor), weight, isDepositor, hourlyLimit, write: hasStake };
 }
 
@@ -325,16 +335,46 @@ function verifySession(token: string): any | null {
   try { const p = JSON.parse(Buffer.from(body, "base64url").toString()); if (p.exp && Date.now() > p.exp) return null; return p; } catch { return null; }
 }
 
-// sliding-window rate limiter (in-memory; single instance)
+// ── rate limiter: Redis (shared across instances) if REDIS_URL, else in-memory ──
+let redis: any = null;
+if (process.env.REDIS_URL) {
+  import("ioredis")
+    .then(({ default: IORedis }) => {
+      redis = new IORedis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 2 });
+      redis.on("error", (e: any) => console.error("[redis]", e.message));
+      console.log("[gov] rate limiter: Redis (shared)");
+    })
+    .catch((e: any) => console.error("[gov] Redis init failed — using memory:", e.message));
+} else {
+  console.log("[gov] rate limiter: in-memory (single instance)");
+}
+
 const rlBuckets = new Map<string, number[]>();
-function rateCheck(id: string, limit: number): { ok: boolean; remaining: number; resetMin: number } {
+function rateMemory(id: string, limit: number) {
   const now = Date.now();
-  let arr = (rlBuckets.get(id) || []).filter((t) => now - t < RL_WINDOW_MS);
+  const arr = (rlBuckets.get(id) || []).filter((t) => now - t < RL_WINDOW_MS);
   const ok = arr.length < limit;
   if (ok) arr.push(now);
   rlBuckets.set(id, arr);
   const resetMin = arr.length ? Math.max(1, Math.ceil((RL_WINDOW_MS - (now - arr[0])) / 60000)) : 0;
   return { ok, remaining: Math.max(0, limit - arr.length), resetMin };
+}
+async function rateRedis(id: string, limit: number) {
+  const key = "custos:rl:" + id, now = Date.now();
+  await redis.zremrangebyscore(key, 0, now - RL_WINDOW_MS);
+  const current: number = await redis.zcard(key);
+  if (current >= limit) {
+    const oldest = await redis.zrange(key, 0, 0, "WITHSCORES");
+    const resetMin = oldest.length ? Math.max(1, Math.ceil((RL_WINDOW_MS - (now - Number(oldest[1]))) / 60000)) : 0;
+    return { ok: false, remaining: 0, resetMin };
+  }
+  await redis.zadd(key, now, now + "-" + Math.random().toString(36).slice(2));
+  await redis.pexpire(key, RL_WINDOW_MS);
+  return { ok: true, remaining: Math.max(0, limit - current - 1), resetMin: 0 };
+}
+async function rateCheck(id: string, limit: number): Promise<{ ok: boolean; remaining: number; resetMin: number }> {
+  if (redis) { try { return await rateRedis(id, limit); } catch (e: any) { console.error("[redis] rl fallback:", e.message); } }
+  return rateMemory(id, limit);
 }
 setInterval(() => { const now = Date.now(); for (const [k, v] of rlBuckets) { const f = v.filter((t) => now - t < RL_WINDOW_MS); if (f.length) rlBuckets.set(k, f); else rlBuckets.delete(k); } }, RL_WINDOW_MS).unref?.();
 
@@ -612,7 +652,7 @@ const httpServer = createServer(async (req, res) => {
       let identity: string, limit: number, canWrite: boolean, tier: string;
       if (sess && sess.a) { identity = "w:" + sess.a; limit = Number(sess.limit) || GOV.anonLimit; canWrite = !!sess.write; tier = sess.tier || "Citizen"; }
       else { identity = "ip:" + clientIp(req); limit = GOV.anonLimit; canWrite = false; tier = "Visitor"; }
-      const rl = rateCheck(identity, limit);
+      const rl = await rateCheck(identity, limit);
       if (!rl.ok) {
         sse({ meta: { tier, remaining: 0, limit, write: canWrite } });
         sse({ t: `You've reached your limit as **${tier}** — ${limit} messages/hour. ${sess ? "Hold more $CUSTOS to raise your standing with me." : "Connect and verify your wallet to raise it."} Resets in ~${rl.resetMin} min.` });
