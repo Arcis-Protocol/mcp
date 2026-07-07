@@ -83,6 +83,7 @@ async function netDeposited(url: string, user: string): Promise<{ net: bigint | 
 
 const CREDIT_ADDR = "0xdf31800e620f728297340d66acf5a306f07ce7a1";
 const CUSTOS_TOKEN = "0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882";
+const CUSTOS_PAY = (process.env.CUSTOS_PAY_ADDRESS || "0x2ad6f1fd7ebf13d9e3f13b7b985db06b8a6a41ab").toLowerCase();
 
 // Tools CUSTOS can call mid-conversation (Anthropic tool schemas).
 const CUSTOS_TOOLS = [
@@ -95,6 +96,8 @@ const CUSTOS_TOOLS = [
   { name: "custos_offerings", description: "CUSTOS's ACP service catalog and the Managed Treasury subscription — everything CUSTOS can be hired to do.", input_schema: { type: "object", properties: {} } },
   { name: "prepare_deposit", description: "Prepare a deposit for the user to sign in their OWN wallet (USDC approval + vault deposit). Use when the user wants to deposit or add funds. You never move funds — you only prepare the steps for them to sign.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount to deposit (min 1)" } }, required: ["amount"] } },
   { name: "prepare_withdraw", description: "Prepare a withdrawal for the user to sign in their OWN wallet. Use when the user wants to withdraw. You never move funds — you only prepare the step for them to sign.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount to withdraw" } }, required: ["amount"] } },
+  { name: "prepare_subscribe", description: "Prepare the Managed Treasury subscription payment (250 USDC / month) for the user to sign. Use when the user wants to subscribe, hire CUSTOS to run their treasury, or start Managed Treasury.", input_schema: { type: "object", properties: {} } },
+  { name: "prepare_borrow", description: "Prepare an AgentCredit borrow for the user to sign: approve raUSDC collateral + borrow USDC. Use when the user wants to borrow against their position / draw a credit line.", input_schema: { type: "object", properties: { borrowUsdc: { type: "number", description: "USDC to borrow" }, collateralUsdc: { type: "number", description: "USDC value of raUSDC collateral to post" } }, required: ["borrowUsdc", "collateralUsdc"] } },
 ];
 
 const CUSTOS_OFFERINGS_TEXT = JSON.stringify({
@@ -187,6 +190,29 @@ async function runCustosTool(name: string, input: any, origin: string, emit?: (o
         { label: `Withdraw ${amt} USDC`, to: VAULT_ADDR, data: withdrawData, value: "0x0" },
       ] } });
       return `Prepared a withdrawal of ~${amt} USDC — one step has been sent to the user's wallet to sign.`;
+    }
+    if (name === "prepare_subscribe") {
+      const { encodeFunctionData } = await import("viem");
+      const price = 250n * 1_000_000n;
+      const data = encodeFunctionData({ abi: parseAbi(["function transfer(address,uint256)"]), functionName: "transfer", args: [CUSTOS_PAY as `0x${string}`, price] });
+      emit && emit({ action: { kind: "subscribe", amountUsdc: 250, steps: [
+        { label: "Pay 250 USDC · Managed Treasury (1 month)", to: USDC_ADDR, data, value: "0x0" },
+      ] } });
+      return "Prepared the Managed Treasury subscription payment (250 USDC / month) for the user to sign. Once paid, CUSTOS begins stewarding their treasury — idle-capital deployment, yield capture, credit and liquidity management, and a digest every cycle.";
+    }
+    if (name === "prepare_borrow") {
+      const borrowUsdc = Number(input?.borrowUsdc || 0);
+      const collateralUsdc = Number(input?.collateralUsdc || 0);
+      if (!(borrowUsdc > 0) || !(collateralUsdc > 0)) return "Need both a borrow amount and a collateral amount in USDC.";
+      const { encodeFunctionData } = await import("viem");
+      const shares = await c.readContract({ address: VAULT_ADDR, abi: parseAbi(["function convertToShares(uint256) view returns (uint256)"]), functionName: "convertToShares", args: [BigInt(Math.round(collateralUsdc * 1e6))] }) as bigint;
+      const approveData = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), functionName: "approve", args: [CREDIT_ADDR as `0x${string}`, shares] });
+      const borrowData = encodeFunctionData({ abi: parseAbi(["function borrow(uint256,uint256)"]), functionName: "borrow", args: [BigInt(Math.round(borrowUsdc * 1e6)), shares] });
+      emit && emit({ action: { kind: "borrow", amountUsdc: borrowUsdc, steps: [
+        { label: `Approve ${collateralUsdc} raUSDC collateral`, to: VAULT_ADDR, data: approveData, value: "0x0" },
+        { label: `Borrow ${borrowUsdc} USDC`, to: CREDIT_ADDR, data: borrowData, value: "0x0" },
+      ] } });
+      return `Prepared a borrow of ${borrowUsdc} USDC against ${collateralUsdc} USDC of raUSDC collateral — two steps to sign. Note: the lending pool must hold liquidity, or the borrow will revert.`;
     }
     return "Unknown tool.";
   } catch (e: any) {
