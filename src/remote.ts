@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHmac, randomBytes } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createArcisServer } from "./server.js";
 
@@ -125,8 +126,11 @@ async function toolClient() {
   return _toolClient;
 }
 
-async function runCustosTool(name: string, input: any, origin: string, emit?: (o: any) => void): Promise<string> {
+async function runCustosTool(name: string, input: any, origin: string, emit?: (o: any) => void, canWrite = true): Promise<string> {
   try {
+    if (name.startsWith("prepare_") && !canWrite) {
+      return "Write actions (deposit, withdraw, borrow, subscribe) are reserved for $CUSTOS holders and Arcis depositors — governance standing. Ask the user to connect and verify their wallet to unlock them.";
+    }
     if (name === "vault_status") return await (await fetch(`${origin}/api/vault`)).text();
     if (name === "get_position") {
       const a = String(input?.address || "");
@@ -259,6 +263,84 @@ async function streamRound(apiKey: string, model: string, system: string, messag
     else if (b.type === "tool_use") { let inp = {}; try { inp = b.json ? JSON.parse(b.json) : {}; } catch {} assistantContent.push({ type: "tool_use", id: b.id, name: b.name, input: inp }); toolUses.push({ id: b.id, name: b.name, input: inp }); }
   }
   return { assistantContent, toolUses, stopReason };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CUSTOS Chat Governance — your $CUSTOS stake sets your standing with CUSTOS.
+//  Verified sign-in (no spoofing), stake-weighted limits, server-side rate limit.
+// ═══════════════════════════════════════════════════════════════════════════
+const CUSTOS_TOKEN_ADDR = "0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882";
+const SESSION_SECRET = process.env.CUSTOS_SESSION_SECRET || randomBytes(32).toString("hex");
+const SESSION_TTL_MS = 24 * 3600 * 1000;
+const RL_WINDOW_MS = 3600 * 1000; // 1 hour
+
+const gnum = (k: string, d: number) => { const v = Number(process.env[k]); return Number.isFinite(v) && v > 0 ? v : d; };
+const GOV = {
+  anonLimit: gnum("CUSTOS_ANON_LIMIT", 6),      // messages/hour, no wallet
+  holderBase: gnum("CUSTOS_HOLDER_BASE", 25),   // floor for any holder/depositor
+  stepUnit: gnum("CUSTOS_STEP_UNIT", 1000),     // $CUSTOS per step
+  stepMsgs: gnum("CUSTOS_STEP_MSGS", 5),        // +messages per step  (more you hold → more)
+  cap: gnum("CUSTOS_MAX_LIMIT", 600),
+  t1: gnum("CUSTOS_TIER1", 1000), t2: gnum("CUSTOS_TIER2", 10000),
+  t3: gnum("CUSTOS_TIER3", 100000), t4: gnum("CUSTOS_TIER4", 1000000),
+};
+function tierName(weight: number, isDepositor: boolean): string {
+  if (weight >= GOV.t4) return "Censor";
+  if (weight >= GOV.t3) return "Consul";
+  if (weight >= GOV.t2) return "Praetor";
+  if (weight >= GOV.t1) return "Patron";
+  if (weight > 0 || isDepositor) return "Citizen";
+  return "Visitor";
+}
+async function governanceFor(address: string) {
+  const { parseAbi } = await import("viem");
+  const c = await toolClient();
+  let weight = 0, shares = 0n;
+  try {
+    const [bal, dec] = await Promise.all([
+      c.readContract({ address: CUSTOS_TOKEN_ADDR, abi: parseAbi(["function balanceOf(address) view returns (uint256)"]), functionName: "balanceOf", args: [address as `0x${string}`] }) as Promise<bigint>,
+      (c.readContract({ address: CUSTOS_TOKEN_ADDR, abi: parseAbi(["function decimals() view returns (uint8)"]), functionName: "decimals" }) as Promise<number>).catch(() => 18),
+    ]);
+    weight = Number(bal) / 10 ** Number(dec);
+  } catch {}
+  try {
+    shares = await c.readContract({ address: VAULT_ADDR, abi: parseAbi(["function balanceOf(address) view returns (uint256)"]), functionName: "balanceOf", args: [address as `0x${string}`] }) as bigint;
+  } catch {}
+  const isDepositor = shares > 0n;
+  const hasStake = weight > 0 || isDepositor;
+  const hourlyLimit = hasStake ? Math.min(GOV.cap, GOV.holderBase + Math.floor(weight / GOV.stepUnit) * GOV.stepMsgs) : GOV.anonLimit;
+  return { tier: tierName(weight, isDepositor), weight, isDepositor, hourlyLimit, write: hasStake };
+}
+
+// stateless HMAC session
+const b64u = (s: string) => Buffer.from(s).toString("base64url");
+function signSession(payload: any): string {
+  const body = b64u(JSON.stringify(payload));
+  return body + "." + createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+}
+function verifySession(token: string): any | null {
+  if (!token || token.indexOf(".") < 0) return null;
+  const [body, mac] = token.split(".");
+  if (mac !== createHmac("sha256", SESSION_SECRET).update(body).digest("base64url")) return null;
+  try { const p = JSON.parse(Buffer.from(body, "base64url").toString()); if (p.exp && Date.now() > p.exp) return null; return p; } catch { return null; }
+}
+
+// sliding-window rate limiter (in-memory; single instance)
+const rlBuckets = new Map<string, number[]>();
+function rateCheck(id: string, limit: number): { ok: boolean; remaining: number; resetMin: number } {
+  const now = Date.now();
+  let arr = (rlBuckets.get(id) || []).filter((t) => now - t < RL_WINDOW_MS);
+  const ok = arr.length < limit;
+  if (ok) arr.push(now);
+  rlBuckets.set(id, arr);
+  const resetMin = arr.length ? Math.max(1, Math.ceil((RL_WINDOW_MS - (now - arr[0])) / 60000)) : 0;
+  return { ok, remaining: Math.max(0, limit - arr.length), resetMin };
+}
+setInterval(() => { const now = Date.now(); for (const [k, v] of rlBuckets) { const f = v.filter((t) => now - t < RL_WINDOW_MS); if (f.length) rlBuckets.set(k, f); else rlBuckets.delete(k); } }, RL_WINDOW_MS).unref?.();
+
+function clientIp(req: any): string {
+  const xf = (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim();
+  return xf || req.socket?.remoteAddress || "unknown";
 }
 
 const httpServer = createServer(async (req, res) => {
@@ -489,6 +571,29 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // ── AI conversation interface: talk to CUSTOS (grounded in live Arcis data) ──
+  // ── Governance sign-in: verify wallet, read stake, issue a session ──
+  if (req.url === "/api/custos/session" && req.method === "POST") {
+    res.setHeader("Content-Type", "application/json");
+    try {
+      let raw = ""; for await (const chunk of req) raw += chunk;
+      const { address, message, signature } = JSON.parse(raw || "{}");
+      if (!address || !message || !signature) { res.writeHead(400); res.end(JSON.stringify({ error: "address, message, signature required" })); return; }
+      const m = /issued:\s*(\d+)/.exec(String(message));
+      const issued = m ? Number(m[1]) : 0;
+      if (!issued || Math.abs(Date.now() - issued) > 10 * 60 * 1000) { res.writeHead(400); res.end(JSON.stringify({ error: "stale or missing timestamp; re-sign" })); return; }
+      const { verifyMessage } = await import("viem");
+      let ok = false;
+      try { ok = await verifyMessage({ address: address as `0x${string}`, message, signature: signature as `0x${string}` }); } catch { ok = false; }
+      if (!ok) { res.writeHead(401); res.end(JSON.stringify({ error: "signature does not match address" })); return; }
+      const g = await governanceFor(address);
+      const exp = Date.now() + SESSION_TTL_MS;
+      const token = signSession({ a: address.toLowerCase(), tier: g.tier, limit: g.hourlyLimit, write: g.write, exp });
+      res.writeHead(200);
+      res.end(JSON.stringify({ token, tier: g.tier, weight: Math.floor(g.weight), hourlyLimit: g.hourlyLimit, write: g.write, isDepositor: g.isDepositor, expiresAt: exp }));
+    } catch (e: any) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
+    return;
+  }
+
   if (req.url === "/api/custos/chat" && req.method === "POST") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     const sse = (o: any) => res.write(`data: ${JSON.stringify(o)}\n\n`);
@@ -499,6 +604,21 @@ const httpServer = createServer(async (req, res) => {
 
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) { sse({ t: "CUSTOS's voice is offline — the server has no ANTHROPIC_API_KEY configured." }); sse({ done: true }); res.end(); return; }
+
+      // identity + governance-weighted rate limit
+      const auth = (req.headers["authorization"] || "").toString();
+      const stok = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+      const sess = stok ? verifySession(stok) : null;
+      let identity: string, limit: number, canWrite: boolean, tier: string;
+      if (sess && sess.a) { identity = "w:" + sess.a; limit = Number(sess.limit) || GOV.anonLimit; canWrite = !!sess.write; tier = sess.tier || "Citizen"; }
+      else { identity = "ip:" + clientIp(req); limit = GOV.anonLimit; canWrite = false; tier = "Visitor"; }
+      const rl = rateCheck(identity, limit);
+      if (!rl.ok) {
+        sse({ meta: { tier, remaining: 0, limit, write: canWrite } });
+        sse({ t: `You've reached your limit as **${tier}** — ${limit} messages/hour. ${sess ? "Hold more $CUSTOS to raise your standing with me." : "Connect and verify your wallet to raise it."} Resets in ~${rl.resetMin} min.` });
+        sse({ done: true }); res.end(); return;
+      }
+      sse({ meta: { tier, remaining: rl.remaining, limit, write: canWrite } });
 
       // live grounding — reuse the endpoints we already serve
       const origin = `http://127.0.0.1:${PORT}`;
@@ -541,7 +661,7 @@ Rules: Be accurate and brief — a few sentences, not an essay. Use only the liv
           sse({ tools: toolUses.map((t) => t.name) });
           const results: any[] = [];
           for (const tu of toolUses) {
-            const out = await runCustosTool(tu.name, tu.input, origin, sse);
+            const out = await runCustosTool(tu.name, tu.input, origin, sse, canWrite);
             results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
           }
           convo = [...convo, { role: "assistant", content: assistantContent }, { role: "user", content: results }];
