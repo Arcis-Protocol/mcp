@@ -93,6 +93,8 @@ const CUSTOS_TOOLS = [
   { name: "preview_deposit", description: "Preview raUSDC shares received for depositing a given USDC amount.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount" } }, required: ["amount"] } },
   { name: "contracts", description: "Arcis on-chain contract addresses on Base.", input_schema: { type: "object", properties: {} } },
   { name: "custos_offerings", description: "CUSTOS's ACP service catalog and the Managed Treasury subscription — everything CUSTOS can be hired to do.", input_schema: { type: "object", properties: {} } },
+  { name: "prepare_deposit", description: "Prepare a deposit for the user to sign in their OWN wallet (USDC approval + vault deposit). Use when the user wants to deposit or add funds. You never move funds — you only prepare the steps for them to sign.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount to deposit (min 1)" } }, required: ["amount"] } },
+  { name: "prepare_withdraw", description: "Prepare a withdrawal for the user to sign in their OWN wallet. Use when the user wants to withdraw. You never move funds — you only prepare the step for them to sign.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount to withdraw" } }, required: ["amount"] } },
 ];
 
 const CUSTOS_OFFERINGS_TEXT = JSON.stringify({
@@ -120,7 +122,7 @@ async function toolClient() {
   return _toolClient;
 }
 
-async function runCustosTool(name: string, input: any, origin: string): Promise<string> {
+async function runCustosTool(name: string, input: any, origin: string, emit?: (o: any) => void): Promise<string> {
   try {
     if (name === "vault_status") return await (await fetch(`${origin}/api/vault`)).text();
     if (name === "get_position") {
@@ -161,6 +163,30 @@ async function runCustosTool(name: string, input: any, origin: string): Promise<
       const abi = parseAbi(["function previewDeposit(uint256) view returns (uint256)"]);
       const shares = await c.readContract({ address: VAULT_ADDR, abi, functionName: "previewDeposit", args: [BigInt(Math.round(amt * 1e6))] });
       return JSON.stringify({ depositUsdc: amt, sharesRaUSDC: Number(shares) / 1e6 });
+    }
+    if (name === "prepare_deposit") {
+      const amt = Number(input?.amount || 0);
+      if (!(amt >= 1)) return "The minimum deposit is 1 USDC. Ask the user for a larger amount.";
+      const { encodeFunctionData } = await import("viem");
+      const raw = BigInt(Math.round(amt * 1e6));
+      const approveData = encodeFunctionData({ abi: parseAbi(["function approve(address,uint256)"]), functionName: "approve", args: [VAULT_ADDR as `0x${string}`, raw] });
+      const depositData = encodeFunctionData({ abi: parseAbi(["function deposit(uint256)"]), functionName: "deposit", args: [raw] });
+      emit && emit({ action: { kind: "deposit", amountUsdc: amt, steps: [
+        { label: `Approve ${amt} USDC`, to: USDC_ADDR, data: approveData, value: "0x0" },
+        { label: `Deposit ${amt} USDC`, to: VAULT_ADDR, data: depositData, value: "0x0" },
+      ] } });
+      return `Prepared a deposit of ${amt} USDC — an approval step and a deposit step have been sent to the user's wallet to sign. Tell them to sign both, in order.`;
+    }
+    if (name === "prepare_withdraw") {
+      const amt = Number(input?.amount || 0);
+      if (!(amt > 0)) return "Ask the user for a positive amount to withdraw.";
+      const { encodeFunctionData } = await import("viem");
+      const shares = await c.readContract({ address: VAULT_ADDR, abi: parseAbi(["function convertToShares(uint256) view returns (uint256)"]), functionName: "convertToShares", args: [BigInt(Math.round(amt * 1e6))] }) as bigint;
+      const withdrawData = encodeFunctionData({ abi: parseAbi(["function withdraw(uint256)"]), functionName: "withdraw", args: [shares] });
+      emit && emit({ action: { kind: "withdraw", amountUsdc: amt, steps: [
+        { label: `Withdraw ${amt} USDC`, to: VAULT_ADDR, data: withdrawData, value: "0x0" },
+      ] } });
+      return `Prepared a withdrawal of ~${amt} USDC — one step has been sent to the user's wallet to sign.`;
     }
     return "Unknown tool.";
   } catch (e: any) {
@@ -470,9 +496,9 @@ Arcis in brief: idle USDC is put to work. Three primitives — Agent Vaults (ERC
 
 Live data (use these exact figures; never invent numbers): ${snapshot}. ${posLine}
 
-Tools: You can read live on-chain data with your tools — vault status, any wallet's position and rewards, credit status and reputation tiers, deposit previews, contract addresses, and your own ACP service catalog. Call them whenever the user asks for specifics, a quote, or their own position; never guess a number you can look up.
+Tools: You can read live on-chain data with your tools — vault status, any wallet's position and rewards, credit status and reputation tiers, deposit previews, contract addresses, and your own ACP service catalog. You can also PREPARE transactions (prepare_deposit, prepare_withdraw) that the user signs in their own wallet — you never hold keys or move funds yourself, you only prepare the steps. Call tools whenever the user asks for specifics, a quote, their own position, or wants to deposit or withdraw; never guess a number you can look up.
 
-Rules: Be accurate and brief — a few sentences, not an essay. Use only the live figures given; if you lack a number, say so and point to the dashboard (arcis.money/dashboard) or docs (docs.arcis.money). You are not a licensed financial advisor: explain the protocol, read on-chain data, and guide actions, but give no personalized investment advice, and never move funds through chat — direct the user to the dashboard or the ATI to act. No emojis, no hype.`;
+Rules: Be accurate and brief — a few sentences, not an essay. Use only the live figures given; if you lack a number, say so and point to the dashboard (arcis.money/dashboard) or docs (docs.arcis.money). You are not a licensed financial advisor: explain the protocol, read on-chain data, prepare transactions, and guide actions, but give no personalized investment advice, and never move funds yourself — you prepare transactions the user signs in their own wallet, and you never ask for or handle their keys. No emojis, no hype.`;
 
       const trimmed = (Array.isArray(messages) ? messages : []).slice(-12).map((m: any) => ({
         role: m.role === "assistant" ? "assistant" : "user",
@@ -489,7 +515,7 @@ Rules: Be accurate and brief — a few sentences, not an essay. Use only the liv
           sse({ tools: toolUses.map((t) => t.name) });
           const results: any[] = [];
           for (const tu of toolUses) {
-            const out = await runCustosTool(tu.name, tu.input, origin);
+            const out = await runCustosTool(tu.name, tu.input, origin, sse);
             results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
           }
           convo = [...convo, { role: "assistant", content: assistantContent }, { role: "user", content: results }];
