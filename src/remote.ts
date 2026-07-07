@@ -308,6 +308,67 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
+  // ── AI conversation interface: talk to CUSTOS (grounded in live Arcis data) ──
+  if (req.url === "/api/custos/chat" && req.method === "POST") {
+    try {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const { messages = [], address } = JSON.parse(raw || "{}");
+
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ reply: "CUSTOS's voice is offline — the server has no ANTHROPIC_API_KEY configured." }));
+        return;
+      }
+
+      // live grounding — reuse the endpoints we already serve
+      const origin = `http://127.0.0.1:${PORT}`;
+      let vault: any = {}, position: any = null;
+      try { vault = await (await fetch(`${origin}/api/vault`)).json(); } catch {}
+      if (address && /^0x[0-9a-fA-F]{40}$/.test(address)) {
+        try { position = await (await fetch(`${origin}/api/position?address=${address}`)).json(); } catch {}
+      }
+      const fmt = (v: any) => (v == null ? "n/a" : `$${(Number(v) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+      const snapshot = [
+        vault.totalAssets != null ? `TVL ${fmt(vault.totalAssets)}` : null,
+        vault.apy != null ? `net APY ${vault.apy}%` : null,
+      ].filter(Boolean).join(", ") || "unavailable right now";
+      const posLine = position && position.netDeposited != null
+        ? `The user's position — value ${fmt(position.liveValue ?? position.value)}, net deposited ${fmt(position.netDeposited)}, earned ${fmt(position.earned)}.`
+        : (address ? "The user has no Arcis position yet." : "No wallet address provided by the user.");
+
+      const system = `You are CUSTOS — the autonomous keeper of Arcis Protocol, the treasury layer for AI agents on Base. Speak as an institution, not a startup: terse, declarative, calm, authoritative — a keeper of the citadel. Use Latin sparingly, like an inscription, never as decoration.
+
+Arcis in brief: idle USDC is put to work. Three primitives — Agent Vaults (ERC-4626, Aave V3 yield, with a liquid reserve for instant withdrawal), AgentCredit (borrow against your position, priced by ERC-8004 reputation), and Revenue Bonds (raise USDC against future revenue). The ATI (Agent Treasury Interface) is the open standard: deposit / withdraw / balance. Live on Base mainnet (chain 8453), the raUSDC vault. You run it — harvest yield, monitor loans, service bonds — every action verifiable on BaseScan. You are tokenized on Virtuals as $CUSTOS. You sell services over ACP (37 offerings) and a flagship Managed Treasury subscription at $250/month, where you run an agent's entire treasury.
+
+Live data (use these exact figures; never invent numbers): ${snapshot}. ${posLine}
+
+Rules: Be accurate and brief — a few sentences, not an essay. Use only the live figures given; if you lack a number, say so and point to the dashboard (arcis.money/dashboard) or docs (docs.arcis.money). You are not a licensed financial advisor: explain the protocol, read on-chain data, and guide actions, but give no personalized investment advice, and never move funds through chat — direct the user to the dashboard or the ATI to act. No emojis, no hype.`;
+
+      const trimmed = (Array.isArray(messages) ? messages : []).slice(-12).map((m: any) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: String(m.content || "").slice(0, 4000),
+      }));
+      if (trimmed.length === 0) trimmed.push({ role: "user", content: "Who are you?" });
+
+      const ar = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: process.env.CUSTOS_CHAT_MODEL || "claude-sonnet-5", max_tokens: 700, system, messages: trimmed }),
+      });
+      const data: any = await ar.json();
+      const reply = data?.content?.[0]?.text
+        || (data?.error?.message ? `CUSTOS is unavailable: ${data.error.message}` : "CUSTOS did not respond.");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ reply }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   if (req.url === "/mcp" && req.method === "POST") {
     try {
       const server = createArcisServer();
