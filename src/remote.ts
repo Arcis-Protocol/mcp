@@ -310,17 +310,15 @@ const httpServer = createServer(async (req, res) => {
 
   // ── AI conversation interface: talk to CUSTOS (grounded in live Arcis data) ──
   if (req.url === "/api/custos/chat" && req.method === "POST") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    const sse = (o: any) => res.write(`data: ${JSON.stringify(o)}\n\n`);
     try {
       let raw = "";
       for await (const chunk of req) raw += chunk;
       const { messages = [], address } = JSON.parse(raw || "{}");
 
       const apiKey = process.env.ANTHROPIC_API_KEY;
-      if (!apiKey) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ reply: "CUSTOS's voice is offline — the server has no ANTHROPIC_API_KEY configured." }));
-        return;
-      }
+      if (!apiKey) { sse({ t: "CUSTOS's voice is offline — the server has no ANTHROPIC_API_KEY configured." }); sse({ done: true }); res.end(); return; }
 
       // live grounding — reuse the endpoints we already serve
       const origin = `http://127.0.0.1:${PORT}`;
@@ -355,16 +353,37 @@ Rules: Be accurate and brief — a few sentences, not an essay. Use only the liv
       const ar = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: process.env.CUSTOS_CHAT_MODEL || "claude-sonnet-5", max_tokens: 700, system, messages: trimmed }),
+        body: JSON.stringify({ model: process.env.CUSTOS_CHAT_MODEL || "claude-sonnet-5", max_tokens: 700, system, messages: trimmed, stream: true }),
       });
-      const data: any = await ar.json();
-      const reply = data?.content?.[0]?.text
-        || (data?.error?.message ? `CUSTOS is unavailable: ${data.error.message}` : "CUSTOS did not respond.");
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ reply }));
+      if (!ar.ok || !ar.body) {
+        const err = await ar.text().catch(() => "");
+        console.error("[custos-chat]", ar.status, err.slice(0, 200));
+        sse({ t: "CUSTOS is unavailable right now." }); sse({ done: true }); res.end(); return;
+      }
+      const reader = ar.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const evt = buf.slice(0, i); buf = buf.slice(i + 2);
+          const dataLine = evt.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const payload = dataLine.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const j = JSON.parse(payload);
+            if (j.type === "content_block_delta" && j.delta?.type === "text_delta") sse({ t: j.delta.text });
+          } catch {}
+        }
+      }
+      sse({ done: true }); res.end();
     } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: e.message }));
+      try { sse({ t: "The citadel is unreachable right now." }); sse({ done: true }); } catch {}
+      res.end();
     }
     return;
   }
