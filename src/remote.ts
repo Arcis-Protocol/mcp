@@ -86,6 +86,29 @@ const CREDIT_ADDR = "0xdf31800e620f728297340d66acf5a306f07ce7a1";
 const CUSTOS_TOKEN = "0xD7C479F720b0bC2FF1088A16D1c06C3e11C62882";
 const CUSTOS_PAY = (process.env.CUSTOS_PAY_ADDRESS || "0x2ad6f1fd7ebf13d9e3f13b7b985db06b8a6a41ab").toLowerCase();
 
+// fiat on/off ramps — provider-agnostic hosted-widget pattern (env-configured)
+const RAMP = {
+  name: process.env.RAMP_PROVIDER || "the ramp provider",
+  apiKey: process.env.RAMP_API_KEY || "",
+  onrampUrl: process.env.RAMP_ONRAMP_URL || "",
+  offrampUrl: process.env.RAMP_OFFRAMP_URL || process.env.RAMP_ONRAMP_URL || "",
+  feeBps: Number(process.env.RAMP_FEE_BPS || 100),
+  network: process.env.RAMP_NETWORK || "base",
+};
+function rampUrl(kind: "buy" | "sell", wallet: string, amount?: number, ccy = "USD"): string | null {
+  const base = kind === "buy" ? RAMP.onrampUrl : RAMP.offrampUrl;
+  if (!base || !RAMP.apiKey) return null;
+  const u = new URL(base);
+  u.searchParams.set("apiKey", RAMP.apiKey);
+  u.searchParams.set("walletAddress", wallet);
+  u.searchParams.set("network", RAMP.network);
+  u.searchParams.set("cryptoCurrencyCode", "USDC");
+  u.searchParams.set("fiatCurrency", ccy);
+  if (kind === "sell") u.searchParams.set("productsAvailed", "SELL");
+  if (amount) u.searchParams.set(kind === "buy" ? "fiatAmount" : "cryptoAmount", String(amount));
+  return u.toString();
+}
+
 // Tools CUSTOS can call mid-conversation (Anthropic tool schemas).
 const CUSTOS_TOOLS = [
   { name: "vault_status", description: "Live Arcis vault status: TVL, net APY, exchange rate, reserve vs deployed, remaining capacity, paused.", input_schema: { type: "object", properties: {} } },
@@ -99,6 +122,8 @@ const CUSTOS_TOOLS = [
   { name: "prepare_withdraw", description: "Prepare a withdrawal for the user to sign in their OWN wallet. Use when the user wants to withdraw. You never move funds — you only prepare the step for them to sign.", input_schema: { type: "object", properties: { amount: { type: "number", description: "USDC amount to withdraw" } }, required: ["amount"] } },
   { name: "prepare_subscribe", description: "Prepare the Managed Treasury subscription payment (250 USDC / month) for the user to sign. Use when the user wants to subscribe, hire CUSTOS to run their treasury, or start Managed Treasury.", input_schema: { type: "object", properties: {} } },
   { name: "prepare_borrow", description: "Prepare an AgentCredit borrow for the user to sign: approve raUSDC collateral + borrow USDC. Use when the user wants to borrow against their position / draw a credit line.", input_schema: { type: "object", properties: { borrowUsdc: { type: "number", description: "USDC to borrow" }, collateralUsdc: { type: "number", description: "USDC value of raUSDC collateral to post" } }, required: ["borrowUsdc", "collateralUsdc"] } },
+  { name: "onramp", description: "Prepare a fiat→USDC on-ramp for the user (buy USDC with card/bank via a licensed provider; USDC lands in their wallet on Base). Use when the user wants to buy, add, or fund with fiat.", input_schema: { type: "object", properties: { amountUsd: { type: "number", description: "USD to convert (optional)" } } } },
+  { name: "offramp", description: "Prepare a USDC→fiat off-ramp for the user (sell USDC for fiat to their bank via a licensed provider). Use when the user wants to cash out or withdraw to a bank.", input_schema: { type: "object", properties: { amountUsdc: { type: "number", description: "USDC to sell (optional)" }, payoutCcy: { type: "string", description: "Payout currency (default USD)" } } } },
 ];
 
 const CUSTOS_OFFERINGS_TEXT = JSON.stringify({
@@ -126,7 +151,7 @@ async function toolClient() {
   return _toolClient;
 }
 
-async function runCustosTool(name: string, input: any, origin: string, emit?: (o: any) => void, canWrite = true): Promise<string> {
+async function runCustosTool(name: string, input: any, origin: string, emit?: (o: any) => void, canWrite = true, addr?: string): Promise<string> {
   try {
     if (name.startsWith("prepare_") && !canWrite) {
       return "Write actions (deposit, withdraw, borrow, subscribe) are reserved for $CUSTOS holders and Arcis depositors — governance standing. Ask the user to connect and verify their wallet to unlock them.";
@@ -217,6 +242,18 @@ async function runCustosTool(name: string, input: any, origin: string, emit?: (o
         { label: `Borrow ${borrowUsdc} USDC`, to: CREDIT_ADDR, data: borrowData, value: "0x0" },
       ] } });
       return `Prepared a borrow of ${borrowUsdc} USDC against ${collateralUsdc} USDC of raUSDC collateral — two steps to sign. Note: the lending pool must hold liquidity, or the borrow will revert.`;
+    }
+    if (name === "onramp" || name === "offramp") {
+      const wallet = String(input?.wallet || addr || "");
+      if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) return "The user needs to connect a wallet first so USDC has a source/destination — ask them to connect.";
+      const buy = name === "onramp";
+      const amount = buy ? Number(input?.amountUsd || 0) : Number(input?.amountUsdc || 0);
+      const url = rampUrl(buy ? "buy" : "sell", wallet, amount || undefined, String(input?.payoutCcy || "USD"));
+      if (!url) return `Fiat ${buy ? "on" : "off"}-ramp isn't configured on the server yet (needs a licensed provider). Tell the user it's coming; meanwhile they can deposit USDC directly.`;
+      const fee = amount ? amount * (RAMP.feeBps / 10000) : 0;
+      const quote = amount ? (buy ? `~${(amount - fee).toFixed(2)} USDC for $${amount} (est. $${fee.toFixed(2)} fee)` : `~$${(amount - fee).toFixed(2)} for ${amount} USDC (est. $${fee.toFixed(2)} fee)`) : "";
+      emit && emit({ ramp: { kind: buy ? "on-ramp" : "off-ramp", provider: RAMP.name, url, summary: quote } });
+      return `Prepared a ${buy ? "fiat→USDC on-ramp" : "USDC→fiat off-ramp"} with ${RAMP.name}${quote ? " — " + quote : ""}. Sent the user a checkout link. ${buy ? "USDC lands in their wallet on Base." : "Fiat pays out to their bank."} The binding quote comes from the provider at checkout.`;
     }
     return "Unknown tool.";
   } catch (e: any) {
@@ -701,7 +738,7 @@ Rules: Be accurate and brief — a few sentences, not an essay. Use only the liv
           sse({ tools: toolUses.map((t) => t.name) });
           const results: any[] = [];
           for (const tu of toolUses) {
-            const out = await runCustosTool(tu.name, tu.input, origin, sse, canWrite);
+            const out = await runCustosTool(tu.name, tu.input, origin, sse, canWrite, address);
             results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
           }
           convo = [...convo, { role: "assistant", content: assistantContent }, { role: "user", content: results }];
